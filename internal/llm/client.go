@@ -93,7 +93,11 @@ func (c *Client) Chat(ctx context.Context, system, user string) (string, error) 
 
 	var cr chatResponse
 	if err := json.Unmarshal(data, &cr); err != nil {
-		return "", fmt.Errorf("decode body: %w", err)
+		// HTML bodies (login pages, gateways, wrong base URL) are the most
+		// common cause; surface the body start so the misconfiguration is
+		// visible in the error the user sees.
+		return "", fmt.Errorf("decode body (status %d, url %s, body starts with %q): %w",
+			resp.StatusCode, url, clip(string(data), 200), err)
 	}
 	if cr.Error != nil {
 		return "", fmt.Errorf("api error: %s", cr.Error.Message)

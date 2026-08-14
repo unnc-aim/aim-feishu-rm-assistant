@@ -2,6 +2,7 @@ package bot
 
 import (
 	"testing"
+	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -56,5 +57,14 @@ func TestExtractText(t *testing.T) {
 	got := extractText(&content, newMentionList("@_user_1"))
 	if got != "视觉识别" {
 		t.Errorf("extractText = %q, want %q", got, "视觉识别")
+	}
+}
+
+func TestSummaryRetryDelay(t *testing.T) {
+	want := []time.Duration{5, 10, 20, 40, 80, 120, 120, 120, 120, 120}
+	for i, w := range want {
+		if got := summaryRetryDelay(i); got != w*time.Second {
+			t.Errorf("summaryRetryDelay(%d) = %v, want %v", i, got, w*time.Second)
+		}
 	}
 }

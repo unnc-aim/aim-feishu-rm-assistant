@@ -19,6 +19,7 @@ import (
 	larkevents "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+	"github.com/sirupsen/logrus"
 
 	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/llm"
 	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/rmsearch"
@@ -151,17 +152,60 @@ func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) er
 	}
 
 	// Async LLM summary follow-up, disabled per-chat when summary_on = 0.
-	// Only the first page triggers a summary to keep cost bounded.
+	// Only the first page triggers a summary to keep cost bounded. On
+	// failure it retries with exponential backoff and, if still failing,
+	// only logs — the user is never shown an error message.
 	if offset == 0 && settings.SummaryOn && b.LLM.Enabled() {
-		go func() {
-			sctx, cancel := context.WithTimeout(context.Background(), summaryTimeout)
-			defer cancel()
-			text, err := SummarizeSearch(sctx, b.LLM, query, res.Hits)
-			card := SummaryCard(query, text, err)
-			_ = b.SendCard(sctx, chatID, card)
-		}()
+		go b.sendSummaryWithRetry(chatID, query, res.Hits)
 	}
 	return nil
+}
+
+// Summary retry tuning: 10 retries, backoff starting at 5s, doubling,
+// capped at 2 minutes (5,10,20,40,80,120,120,120,120,120s).
+const (
+	summaryMaxRetries  = 10
+	summaryBackoffBase = 5 * time.Second
+	summaryBackoffMax  = 2 * time.Minute
+	summaryCallTimeout = 90 * time.Second
+)
+
+// summaryRetryDelay returns the wait before retry i (0-based).
+func summaryRetryDelay(i int) time.Duration {
+	d := summaryBackoffBase << i
+	if d > summaryBackoffMax || d <= 0 { // <=0 guards shift overflow
+		return summaryBackoffMax
+	}
+	return d
+}
+
+// sendSummaryWithRetry summarizes a search and sends the summary card,
+// retrying on failure with exponential backoff. After exhausting the
+// retries it logs the error and gives up silently.
+func (b *Bot) sendSummaryWithRetry(chatID, query string, hits []rmsearch.Document) {
+	var (
+		text    string
+		lastErr error
+	)
+	for attempt := 0; attempt <= summaryMaxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(summaryRetryDelay(attempt - 1))
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), summaryCallTimeout)
+		text, lastErr = SummarizeSearch(sctx, b.LLM, query, hits)
+		cancel()
+		if lastErr == nil {
+			break
+		}
+		logrus.Warnf("search summary for %q attempt %d/%d failed: %v",
+			query, attempt+1, summaryMaxRetries+1, lastErr)
+	}
+	if lastErr != nil {
+		logrus.Errorf("search summary for %q gave up after %d attempts: %v",
+			query, summaryMaxRetries+1, lastErr)
+		return
+	}
+	_ = b.SendCard(context.Background(), chatID, SummaryCard(query, text))
 }
 
 // doPage handles "下一页" / "上一页" / "第N页" style commands.

@@ -12,9 +12,6 @@ import (
 	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/store"
 )
 
-// summaryTimeout bounds the async LLM summary follow-up of a search.
-const summaryTimeout = 90 * time.Second
-
 // ---------- helpers ----------
 
 func mdText(content string) map[string]interface{} {
@@ -103,18 +100,10 @@ func EmptyResultCard(query string) map[string]interface{} {
 	}
 }
 
-// SummaryCard renders the async LLM summary follow-up of a search.
-func SummaryCard(query, summary string, err error) map[string]interface{} {
-	if err != nil {
-		return map[string]interface{}{
-			"config": map[string]interface{}{"wide_screen_mode": true},
-			"header": header("AI 总结", "orange"),
-			"elements": []map[string]interface{}{
-				mdElement(fmt.Sprintf("关键词 **%s** 的 AI 总结暂不可用, 请直接查看上方结果。", escape(query))),
-				note("原因: " + escape(err.Error())),
-			},
-		}
-	}
+// SummaryCard renders the async LLM summary follow-up of a search. Summary
+// failures are retried with backoff and then only logged, so there is no
+// failure variant of this card.
+func SummaryCard(query, summary string) map[string]interface{} {
 	return map[string]interface{}{
 		"config": map[string]interface{}{"wide_screen_mode": true},
 		"header": header("AI 总结", "turquoise"),
