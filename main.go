@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/sirupsen/logrus"
@@ -46,7 +47,8 @@ func main() {
 
 	logrus.Infof("logging to file %s", cfg.LogPath)
 
-	larkClient := lark.NewClient(cfg.AppID, cfg.AppSecret)
+	larkClient := lark.NewClient(cfg.AppID, cfg.AppSecret,
+		lark.WithReqTimeout(15*time.Second))
 	searchClient := rmsearch.NewClient(cfg.RmSearchBaseURL)
 	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 	b := bot.New(larkClient, cfg.AppID, cfg.AppSecret, searchClient, llmClient, st, cfg.PushDefaultHour, cfg.PushDefaultMinute)

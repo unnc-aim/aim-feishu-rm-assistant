@@ -1,6 +1,13 @@
 // Package bot implements the Feishu bot: receiving messages over the
 // WebSocket long connection and replying with interactive cards.
 //
+// The SDK dispatches event frames serially on its WebSocket read loop, so
+// the receive callback must never block on upstream calls. Incoming
+// messages are therefore validated and logged in the callback, then handed
+// to a bounded worker pool (hash-routed per chat to preserve ordering).
+// Every downstream call has a timeout, every goroutine has panic
+// recovery, and every step is logged.
+//
 // Note: card action callbacks are not wired because the official Go SDK
 // stubs card frames on the long connection (ws.Client drops
 // MessageTypeCard). All interaction therefore happens through chat text.
@@ -9,7 +16,10 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +38,24 @@ import (
 
 // ResultsPerPage is the page size of search result cards.
 const ResultsPerPage = 5
+
+// Worker pool and timeout tuning. Messages of one chat always go to the
+// same worker (hash routing) so replies stay ordered; different chats are
+// processed in parallel. Bounded queues drop with a warning instead of
+// ever blocking the WebSocket read loop.
+const (
+	workerCount    = 8
+	queuePerWorker = 64
+	handleTimeout  = 60 * time.Second
+	sendTimeout    = 15 * time.Second
+)
+
+// task is one queued user message.
+type task struct {
+	ChatID   string
+	ChatType string
+	Text     string
+}
 
 // searchState remembers the last query of a chat for pagination commands.
 type searchState struct {
@@ -50,11 +78,12 @@ type Bot struct {
 		PushMinute int
 	}
 
+	queues       []chan task
 	lastSearch   map[string]*searchState
 	lastSearchMu sync.Mutex
 }
 
-// New creates a Bot.
+// New creates a Bot and starts its worker pool.
 func New(larkClient *lark.Client, appID, appSecret string, search *rmsearch.Client, llmClient *llm.Client, st *store.Store, defHour, defMinute int) *Bot {
 	b := &Bot{
 		Lark:       larkClient,
@@ -63,12 +92,92 @@ func New(larkClient *lark.Client, appID, appSecret string, search *rmsearch.Clie
 		Search:     search,
 		LLM:        llmClient,
 		Store:      st,
+		queues:     make([]chan task, workerCount),
 		lastSearch: map[string]*searchState{},
 	}
 	b.Defaults.PushHour = defHour
 	b.Defaults.PushMinute = defMinute
+
+	for i := range b.queues {
+		b.queues[i] = make(chan task, queuePerWorker)
+		go b.worker(i)
+	}
+	logrus.Infof("bot worker pool started: %d workers, %d slots each", workerCount, queuePerWorker)
 	return b
 }
+
+// ---------- worker pool ----------
+
+// worker drains its queue; one chat is always routed here.
+func (b *Bot) worker(i int) {
+	for t := range b.queues[i] {
+		b.runTask(t)
+	}
+}
+
+// runTask processes one message with a hard timeout and panic recovery so
+// neither a slow upstream nor a bug can take down the process.
+func (b *Bot) runTask(t task) {
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.WithFields(logrus.Fields{
+				"chat_id": t.ChatID,
+			}).Errorf("panic in message handler: %v\n%s", r, debug.Stack())
+		}
+	}()
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
+	defer cancel()
+
+	if err := b.handleText(ctx, t.ChatID, t.ChatType, t.Text); err != nil {
+		logrus.WithField("chat_id", t.ChatID).
+			Errorf("handle message %q failed after %s: %v",
+				clip(t.Text, 100), time.Since(start).Round(time.Millisecond), err)
+		return
+	}
+	logrus.WithFields(logrus.Fields{
+		"chat_id":  t.ChatID,
+		"duration": time.Since(start).Round(time.Millisecond).String(),
+	}).Infof("handled message: %s", clip(t.Text, 100))
+}
+
+// enqueue routes a message to the worker owning its chat. It never
+// blocks: on a full queue the message is dropped with a warning and a
+// best-effort busy notice.
+func (b *Bot) enqueue(t task) bool {
+	idx := int(fnv32(t.ChatID) % uint32(workerCount))
+	select {
+	case b.queues[idx] <- t:
+		return true
+	default:
+		logrus.WithFields(logrus.Fields{
+			"chat_id": t.ChatID,
+			"worker":  idx,
+		}).Warnf("queue full, dropping message: %s", clip(t.Text, 100))
+		go func() {
+			defer recoverSilently("busy notice")
+			ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+			defer cancel()
+			_ = b.SendText(ctx, t.ChatID, "消息处理繁忙, 请稍后重试。")
+		}()
+		return false
+	}
+}
+
+func recoverSilently(what string) {
+	if r := recover(); r != nil {
+		logrus.Errorf("panic in %s: %v\n%s", what, r, debug.Stack())
+	}
+}
+
+func fnv32(s string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return h.Sum32()
+}
+
+// ---------- Feishu wiring ----------
 
 // NewWSClient builds the WebSocket long-connection client.
 func (b *Bot) NewWSClient() *larkws.Client {
@@ -80,8 +189,12 @@ func (b *Bot) NewWSClient() *larkws.Client {
 	)
 }
 
-// onMessageReceive handles a text message event.
-func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+// onMessageReceive validates and logs the event, then hands the message to
+// the worker pool. It always returns quickly so the SDK read loop is never
+// blocked by upstream calls.
+func (b *Bot) onMessageReceive(_ context.Context, event *larkim.P2MessageReceiveV1) error {
+	defer recoverSilently("onMessageReceive")
+
 	msg := event.Event.Message
 	if msg == nil || msg.MessageType == nil || *msg.MessageType != "text" {
 		return nil
@@ -107,6 +220,13 @@ func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageRecei
 		"msg_type":  deref(msg.MessageType),
 	}).Infof("received message: %s", clip(text, 200))
 
+	b.enqueue(task{ChatID: chatID, ChatType: chatType, Text: text})
+	return nil
+}
+
+// handleText routes one validated message to help / pagination / intents /
+// search.
+func (b *Bot) handleText(ctx context.Context, chatID, chatType, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return b.SendText(ctx, chatID, "请发送关键词开始搜索，或回复“帮助”查看用法。")
 	}
@@ -128,21 +248,33 @@ func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageRecei
 	return b.doSearch(ctx, chatID, text, 0)
 }
 
+// ---------- search ----------
+
 // doSearch queries rm-search, replies with a result card, then optionally
 // follows up with an LLM summary message.
 func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) error {
-	logrus.WithField("chat_id", chatID).Infof("search %q (offset %d)", query, offset)
+	start := time.Now()
 	res, err := b.Search.Search(ctx, &rmsearch.SearchRequest{
 		Q:      query,
 		Limit:  ResultsPerPage,
 		Offset: offset,
 	})
 	if err != nil {
-		return b.SendText(ctx, chatID, "搜索失败: "+err.Error())
+		logrus.WithField("chat_id", chatID).
+			Warnf("search %q (offset %d) failed after %s: %v",
+				query, offset, time.Since(start).Round(time.Millisecond), err)
+		return b.SendText(ctx, chatID, "搜索失败, 请稍后重试。")
 	}
+	logrus.WithFields(logrus.Fields{
+		"chat_id":  chatID,
+		"duration": time.Since(start).Round(time.Millisecond).String(),
+		"hits":     len(res.Hits),
+		"total":    res.Total,
+	}).Infof("search %q (offset %d)", query, offset)
 
 	settings, err := b.Store.GetSettings(chatID, "p2p")
 	if err != nil {
+		logrus.WithField("chat_id", chatID).Warnf("load settings failed, using defaults: %v", err)
 		settings = &store.Settings{SummaryOn: true}
 	}
 
@@ -156,7 +288,7 @@ func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) er
 	}
 
 	if err := b.SendCard(ctx, chatID, SearchResultCard(query, res, offset, ResultsPerPage, settings.SummaryOn)); err != nil {
-		return err
+		return fmt.Errorf("send result card: %w", err)
 	}
 
 	// Async LLM summary follow-up, disabled per-chat when summary_on = 0.
@@ -164,7 +296,10 @@ func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) er
 	// failure it retries with exponential backoff and, if still failing,
 	// only logs — the user is never shown an error message.
 	if offset == 0 && settings.SummaryOn && b.LLM.Enabled() {
-		go b.sendSummaryWithRetry(chatID, query, res.Hits)
+		go func() {
+			defer recoverSilently("search summary")
+			b.sendSummaryWithRetry(chatID, query, res.Hits)
+		}()
 	}
 	return nil
 }
@@ -200,20 +335,33 @@ func (b *Bot) sendSummaryWithRetry(chatID, query string, hits []rmsearch.Documen
 			time.Sleep(summaryRetryDelay(attempt - 1))
 		}
 		sctx, cancel := context.WithTimeout(context.Background(), summaryCallTimeout)
+		start := time.Now()
 		text, lastErr = SummarizeSearch(sctx, b.LLM, query, hits)
 		cancel()
 		if lastErr == nil {
+			logrus.WithFields(logrus.Fields{
+				"chat_id":  chatID,
+				"duration": time.Since(start).Round(time.Millisecond).String(),
+				"attempt":  attempt + 1,
+			}).Infof("search summary ready for %q", query)
 			break
 		}
-		logrus.Warnf("search summary for %q attempt %d/%d failed: %v",
-			query, attempt+1, summaryMaxRetries+1, lastErr)
+		logrus.WithField("chat_id", chatID).Warnf(
+			"search summary for %q attempt %d/%d failed after %s: %v",
+			query, attempt+1, summaryMaxRetries+1,
+			time.Since(start).Round(time.Millisecond), lastErr)
 	}
 	if lastErr != nil {
-		logrus.Errorf("search summary for %q gave up after %d attempts: %v",
+		logrus.WithField("chat_id", chatID).Errorf(
+			"search summary for %q gave up after %d attempts: %v",
 			query, summaryMaxRetries+1, lastErr)
 		return
 	}
-	_ = b.SendCard(context.Background(), chatID, SummaryCard(query, text))
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+	defer cancel()
+	if err := b.SendCard(ctx, chatID, SummaryCard(query, text)); err != nil {
+		logrus.WithField("chat_id", chatID).Warnf("send summary card failed: %v", err)
+	}
 }
 
 // doPage handles "下一页" / "上一页" / "第N页" style commands.
@@ -252,14 +400,17 @@ func (b *Bot) recallSearch(chatID string) *searchState {
 	return s
 }
 
+// ---------- settings ----------
+
 // handleIntent applies a subscription/settings intent and confirms with the
 // settings card.
 func (b *Bot) handleIntent(ctx context.Context, chatID, chatType string, intent *Intent) error {
 	logrus.WithField("chat_id", chatID).Infof("intent kind=%d hasTime=%v time=%02d:%02d",
 		intent.Kind, intent.HasTime, intent.Hour, intent.Minute)
+
 	// Make sure the chat has a settings row.
 	if _, err := b.Store.GetSettings(chatID, chatType); err != nil {
-		return err
+		return fmt.Errorf("ensure settings: %w", err)
 	}
 
 	hour, minute := b.Defaults.PushHour, b.Defaults.PushMinute
@@ -270,23 +421,23 @@ func (b *Bot) handleIntent(ctx context.Context, chatID, chatType string, intent 
 	switch intent.Kind {
 	case IntentUnsubscribe:
 		if err := b.Store.Unsubscribe(chatID); err != nil {
-			return err
+			return fmt.Errorf("unsubscribe: %w", err)
 		}
 	case IntentSummaryOn:
 		if err := b.Store.SetSummary(chatID, true); err != nil {
-			return err
+			return fmt.Errorf("set summary on: %w", err)
 		}
 	case IntentSummaryOff:
 		if err := b.Store.SetSummary(chatID, false); err != nil {
-			return err
+			return fmt.Errorf("set summary off: %w", err)
 		}
 	case IntentSubscribeDaily:
 		if err := b.Store.UpsertSubscription(chatID, store.FrequencyDaily, hour, minute); err != nil {
-			return err
+			return fmt.Errorf("subscribe daily: %w", err)
 		}
 	case IntentSubscribeWeekly:
 		if err := b.Store.UpsertSubscription(chatID, store.FrequencyWeekly, hour, minute); err != nil {
-			return err
+			return fmt.Errorf("subscribe weekly: %w", err)
 		}
 	default:
 		return nil
@@ -297,10 +448,13 @@ func (b *Bot) handleIntent(ctx context.Context, chatID, chatType string, intent 
 func (b *Bot) settingsView(chatID string) *store.Settings {
 	st, err := b.Store.GetSettings(chatID, "p2p")
 	if err != nil {
+		logrus.WithField("chat_id", chatID).Warnf("load settings failed: %v", err)
 		return &store.Settings{ChatID: chatID, SummaryOn: true}
 	}
 	return st
 }
+
+// ---------- sending ----------
 
 // SendText sends a plain text message to a chat.
 func (b *Bot) SendText(ctx context.Context, chatID, text string) error {
@@ -317,6 +471,9 @@ func (b *Bot) SendText(ctx context.Context, chatID, text string) error {
 			Build()).
 		Build()
 	_, err = b.Lark.Im.V1.Message.Create(ctx, req)
+	if err != nil {
+		logrus.WithField("chat_id", chatID).Warnf("send text failed: %v", err)
+	}
 	return err
 }
 
@@ -335,8 +492,13 @@ func (b *Bot) SendCard(ctx context.Context, chatID string, card map[string]any) 
 			Build()).
 		Build()
 	_, err = b.Lark.Im.V1.Message.Create(ctx, req)
+	if err != nil {
+		logrus.WithField("chat_id", chatID).Warnf("send card failed: %v", err)
+	}
 	return err
 }
+
+// ---------- message parsing ----------
 
 // pageRef is either a relative page turn or an absolute page number.
 type pageRef struct {

@@ -1,8 +1,14 @@
 // Package push schedules and renders periodic digest pushes.
+//
+// Each due subscription is pushed in its own panic-recovered goroutine
+// with a hard timeout and an in-flight guard, so a slow rm-search or LLM
+// upstream can never block the scheduling loop or other subscriptions.
 package push
 
 import (
 	"context"
+	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -11,20 +17,28 @@ import (
 	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/store"
 )
 
+// Push tuning: one digest may take a couple of LLM round trips.
+const (
+	pushCheckInterval = 30 * time.Second
+	pushTimeout       = 5 * time.Minute
+)
+
 // Scheduler periodically checks subscriptions and sends digests.
 type Scheduler struct {
 	Bot   *bot.Bot
 	Store *store.Store
+
+	inFlight sync.Map // chatID -> struct{}{}
 }
 
 // Start runs the scheduling loop until ctx is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
-	const interval = 30 * time.Second
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(pushCheckInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			logrus.Info("push scheduler stopped")
 			return
 		case <-ticker.C:
 			s.tick(ctx)
@@ -34,16 +48,56 @@ func (s *Scheduler) Start(ctx context.Context) {
 
 // tick evaluates all active subscriptions once.
 func (s *Scheduler) tick(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.Errorf("panic in push scheduler tick: %v\n%s", r, debug.Stack())
+		}
+	}()
+
 	subs, err := s.Store.ActiveSubscriptions()
 	if err != nil {
 		logrus.Errorf("load subscriptions: %v", err)
 		return
 	}
+
 	now := time.Now()
+	due := 0
 	for _, sub := range subs {
-		if s.due(sub, now) {
-			s.pushOne(ctx, sub, now)
+		if !s.due(sub, now) {
+			continue
 		}
+		due++
+		if _, busy := s.inFlight.LoadOrStore(sub.ChatID, struct{}{}); busy {
+			logrus.WithField("chat_id", sub.ChatID).
+				Warn("push already in flight, skipping this slot")
+			continue
+		}
+		go s.pushOneGuarded(sub, now)
+	}
+	if due > 0 {
+		logrus.Infof("push tick: %d subscriptions due", due)
+	}
+}
+
+// pushOneGuarded wraps one push with panic recovery, a timeout and the
+// in-flight release.
+func (s *Scheduler) pushOneGuarded(sub *store.Settings, now time.Time) {
+	defer s.inFlight.Delete(sub.ChatID)
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.WithField("chat_id", sub.ChatID).
+				Errorf("panic in digest push: %v\n%s", r, debug.Stack())
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
+	defer cancel()
+
+	start := time.Now()
+	if err := s.pushOne(ctx, sub, now); err != nil {
+		logrus.WithField("chat_id", sub.ChatID).
+			Errorf("digest push failed after %s: %v",
+				time.Since(start).Round(time.Millisecond), err)
 	}
 }
 
@@ -83,30 +137,37 @@ func slotOf(sub *store.Settings, now time.Time) time.Time {
 }
 
 // pushOne builds and sends the digest for one subscription, then records it.
-func (s *Scheduler) pushOne(ctx context.Context, sub *store.Settings, now time.Time) {
+func (s *Scheduler) pushOne(ctx context.Context, sub *store.Settings, now time.Time) error {
 	start, end := windowOf(sub, now)
 	if done, err := s.Store.WasPushed(sub.ChatID, start, end); err != nil {
-		logrus.Errorf("check push log: %v", err)
-		return
+		return err
 	} else if done {
 		// Refill last_push_at so due() stops firing for this slot.
-		_ = s.markOnly(sub.ChatID)
-		return
+		logrus.WithField("chat_id", sub.ChatID).Infof(
+			"period %s ~ %s already pushed, refilling last_push_at", start, end)
+		return s.markOnly(sub.ChatID)
 	}
+
+	logrus.WithFields(logrus.Fields{
+		"chat_id": sub.ChatID,
+		"window":  start.Format("01-02 15:04") + " ~ " + end.Format("01-02 15:04"),
+	}).Infof("building %s digest", sub.Frequency)
 
 	card, err := s.BuildDigest(ctx, start, end)
 	if err != nil {
-		logrus.Errorf("build digest for %s: %v", sub.ChatID, err)
-		return
+		return err
 	}
 	if err := s.Bot.SendCard(ctx, sub.ChatID, card); err != nil {
-		logrus.Errorf("send digest to %s: %v", sub.ChatID, err)
-		return
+		return err
 	}
 	if err := s.Store.MarkPushed(sub.ChatID, start, end); err != nil {
-		logrus.Errorf("mark pushed %s: %v", sub.ChatID, err)
+		return err
 	}
-	logrus.Infof("digest pushed to %s (%s, %s ~ %s)", sub.ChatID, sub.Frequency, start, end)
+	logrus.WithFields(logrus.Fields{
+		"chat_id":  sub.ChatID,
+		"duration": time.Since(now).Round(time.Millisecond).String(),
+	}).Infof("%s digest pushed (%s ~ %s)", sub.Frequency, start, end)
+	return nil
 }
 
 func (s *Scheduler) markOnly(chatID string) error {
