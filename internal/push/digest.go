@@ -10,6 +10,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/bot"
 	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/llm"
 	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/rmsearch"
 )
@@ -110,7 +111,7 @@ func (s *Scheduler) renderDigest(ctx context.Context, start, end time.Time, anno
 	if summaryErr != nil {
 		elements = append(elements, mdElement("AI 摘要暂不可用, 以下为原始条目列表。"))
 	} else if summaryText != "" {
-		elements = append(elements, mdElement(summaryText), divider())
+		elements = append(elements, mdElement(bot.SanitizeSummary(summaryText)), divider())
 	}
 
 	elements = append(elements, mdElement(fmt.Sprintf("**官网公告** (%d)", len(announces))))

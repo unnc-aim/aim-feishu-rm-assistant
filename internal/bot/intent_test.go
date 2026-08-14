@@ -68,3 +68,53 @@ func TestSummaryRetryDelay(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeSummary(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain text", "plain text"},
+		{"*italic* must go", "italic must go"},
+		{"**bold** stays", "**bold** stays"},
+		{"snake_case_word", `snake\_case\_word`},
+		{"*one* and **two** mixed", "one and **two** mixed"},
+	}
+	for _, c := range cases {
+		if got := SanitizeSummary(c.in); got != c.want {
+			t.Errorf("SanitizeSummary(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestMentionsSelf(t *testing.T) {
+	self := "ou_self"
+	openID := func(s string) *larkim.MentionEvent {
+		id := s
+		return &larkim.MentionEvent{Id: &larkim.UserId{OpenId: &id}}
+	}
+	mentions := []*larkim.MentionEvent{openID("ou_other"), openID("ou_self")}
+	if !mentionsSelf(mentions, self) {
+		t.Error("mentionsSelf should find the bot")
+	}
+	if mentionsSelf(mentions[:1], self) {
+		t.Error("mentionsSelf must not match other users")
+	}
+	if mentionsSelf(nil, self) {
+		t.Error("mentionsSelf on empty list must be false")
+	}
+}
+
+func TestPrependAtElement(t *testing.T) {
+	card := map[string]any{
+		"elements": []map[string]any{
+			{"tag": "div", "text": map[string]any{"content": "body"}},
+		},
+	}
+	prependAtElement(card, "<at user_id=\"ou_x\"></at>")
+	elements := card["elements"].([]map[string]any)
+	if len(elements) != 2 {
+		t.Fatalf("elements len = %d, want 2", len(elements))
+	}
+	first := elements[0]["text"].(map[string]any)["content"].(string)
+	if first != "<at user_id=\"ou_x\"></at>" {
+		t.Errorf("first element content = %q", first)
+	}
+}

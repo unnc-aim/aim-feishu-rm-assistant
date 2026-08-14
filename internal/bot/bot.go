@@ -8,6 +8,9 @@
 // Every downstream call has a timeout, every goroutine has panic
 // recovery, and every step is logged.
 //
+// In group chats the bot only reacts when mentioned by its own identity
+// (bot/v3/info open_id), and group replies mention the asking user.
+//
 // Note: card action callbacks are not wired because the official Go SDK
 // stubs card frames on the long connection (ws.Client drops
 // MessageTypeCard). All interaction therefore happens through chat text.
@@ -26,6 +29,7 @@ import (
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkevents "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
@@ -48,12 +52,17 @@ const (
 	queuePerWorker = 64
 	handleTimeout  = 60 * time.Second
 	sendTimeout    = 15 * time.Second
+
+	// botInfoRetryInterval throttles retries when the bot/v3/info lookup
+	// fails, so a group message storm cannot hammer the API.
+	botInfoRetryInterval = time.Minute
 )
 
-// task is one queued user message.
+// task is one queued user message; it doubles as the reply target.
 type task struct {
 	ChatID   string
 	ChatType string
+	SenderID string // asking user's open_id, mentioned in group replies
 	Text     string
 }
 
@@ -81,6 +90,10 @@ type Bot struct {
 	queues       []chan task
 	lastSearch   map[string]*searchState
 	lastSearchMu sync.Mutex
+
+	botInfoMu      sync.Mutex
+	botOpenID      string
+	botInfoLastTry time.Time
 }
 
 // New creates a Bot and starts its worker pool.
@@ -103,6 +116,16 @@ func New(larkClient *lark.Client, appID, appSecret string, search *rmsearch.Clie
 		go b.worker(i)
 	}
 	logrus.Infof("bot worker pool started: %d workers, %d slots each", workerCount, queuePerWorker)
+
+	// Warm the bot identity cache so the first group mention works.
+	go func() {
+		defer recoverSilently("bot info warm-up")
+		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+		defer cancel()
+		if _, err := b.BotSelfOpenID(ctx); err != nil {
+			logrus.Warnf("bot info warm-up failed (will retry on demand): %v", err)
+		}
+	}()
 	return b
 }
 
@@ -130,7 +153,7 @@ func (b *Bot) runTask(t task) {
 	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
 	defer cancel()
 
-	if err := b.handleText(ctx, t.ChatID, t.ChatType, t.Text); err != nil {
+	if err := b.handleText(ctx, t); err != nil {
 		logrus.WithField("chat_id", t.ChatID).
 			Errorf("handle message %q failed after %s: %v",
 				clip(t.Text, 100), time.Since(start).Round(time.Millisecond), err)
@@ -159,7 +182,7 @@ func (b *Bot) enqueue(t task) bool {
 			defer recoverSilently("busy notice")
 			ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 			defer cancel()
-			_ = b.SendText(ctx, t.ChatID, "消息处理繁忙, 请稍后重试。")
+			_ = b.replyText(ctx, t, "消息处理繁忙, 请稍后重试。")
 		}()
 		return false
 	}
@@ -192,7 +215,7 @@ func (b *Bot) NewWSClient() *larkws.Client {
 // onMessageReceive validates and logs the event, then hands the message to
 // the worker pool. It always returns quickly so the SDK read loop is never
 // blocked by upstream calls.
-func (b *Bot) onMessageReceive(_ context.Context, event *larkim.P2MessageReceiveV1) error {
+func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	defer recoverSilently("onMessageReceive")
 
 	msg := event.Event.Message
@@ -204,55 +227,109 @@ func (b *Bot) onMessageReceive(_ context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 	chatType := deref(msg.ChatType)
+	senderID := ""
+	if event.Event.Sender != nil && event.Event.Sender.SenderId != nil {
+		senderID = deref(event.Event.Sender.SenderId.OpenId)
+	}
 
 	text := extractText(msg.Content, msg.Mentions)
 
-	// In a group chat the bot only reacts when mentioned; in a p2p chat
-	// every text message is treated as input.
-	if chatType == "group" && !mentionsBot(msg.Mentions) {
-		return nil
+	// In a group chat the bot only reacts when mentioned by its own
+	// identity; mentioning someone else must not trigger it.
+	if chatType == "group" {
+		selfID, err := b.BotSelfOpenID(ctx)
+		if err != nil {
+			logrus.WithField("chat_id", chatID).
+				Warnf("cannot resolve bot identity, ignoring group message: %v", err)
+			return nil
+		}
+		if !mentionsSelf(msg.Mentions, selfID) {
+			return nil
+		}
 	}
 
 	// Every user question/command is logged (to stderr and the log file).
 	logrus.WithFields(logrus.Fields{
 		"chat_id":   chatID,
 		"chat_type": chatType,
+		"sender":    senderID,
 		"msg_type":  deref(msg.MessageType),
 	}).Infof("received message: %s", clip(text, 200))
 
-	b.enqueue(task{ChatID: chatID, ChatType: chatType, Text: text})
+	b.enqueue(task{ChatID: chatID, ChatType: chatType, SenderID: senderID, Text: text})
 	return nil
+}
+
+// BotSelfOpenID returns the bot's own open_id (bot/v3/info), cached after
+// the first success. Failed lookups are retried at most once per interval.
+func (b *Bot) BotSelfOpenID(ctx context.Context) (string, error) {
+	b.botInfoMu.Lock()
+	defer b.botInfoMu.Unlock()
+
+	if b.botOpenID != "" {
+		return b.botOpenID, nil
+	}
+	if !b.botInfoLastTry.IsZero() && time.Since(b.botInfoLastTry) < botInfoRetryInterval {
+		next := (botInfoRetryInterval - time.Since(b.botInfoLastTry)).Round(time.Second)
+		return "", fmt.Errorf("bot info lookup failed recently, next retry in %s", next)
+	}
+	b.botInfoLastTry = time.Now()
+
+	resp, err := b.Lark.Get(ctx, "/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		return "", fmt.Errorf("get bot info: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("get bot info: status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID  string `json:"open_id"`
+			AppName string `json:"app_name"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &payload); err != nil {
+		return "", fmt.Errorf("decode bot info: %w", err)
+	}
+	if payload.Code != 0 || payload.Bot.OpenID == "" {
+		return "", fmt.Errorf("get bot info: code %d, msg %s", payload.Code, payload.Msg)
+	}
+	b.botOpenID = payload.Bot.OpenID
+	logrus.Infof("bot identity resolved: open_id=%s name=%s", payload.Bot.OpenID, payload.Bot.AppName)
+	return b.botOpenID, nil
 }
 
 // handleText routes one validated message to help / pagination / intents /
 // search.
-func (b *Bot) handleText(ctx context.Context, chatID, chatType, text string) error {
-	if strings.TrimSpace(text) == "" {
-		return b.SendText(ctx, chatID, "请发送关键词开始搜索，或回复“帮助”查看用法。")
+func (b *Bot) handleText(ctx context.Context, t task) error {
+	if strings.TrimSpace(t.Text) == "" {
+		return b.replyText(ctx, t, "请发送关键词开始搜索，或回复“帮助”查看用法。")
 	}
 
-	if isHelp(text) {
-		return b.SendCard(ctx, chatID, HelpCard())
+	if isHelp(t.Text) {
+		return b.replyCard(ctx, t, HelpCard())
 	}
 
 	// Pagination commands act on the previous query of this chat.
-	if page, ok := parsePageCommand(text); ok {
-		return b.doPage(ctx, chatID, page)
+	if page, ok := parsePageCommand(t.Text); ok {
+		return b.doPage(ctx, t, page)
 	}
 
 	// Subscription and settings intents take precedence over search.
-	if intent := ParseIntent(text); intent.Kind != IntentNone {
-		return b.handleIntent(ctx, chatID, chatType, intent)
+	if intent := ParseIntent(t.Text); intent.Kind != IntentNone {
+		return b.handleIntent(ctx, t, intent)
 	}
 
-	return b.doSearch(ctx, chatID, text, 0)
+	return b.doSearch(ctx, t, t.Text, 0)
 }
 
 // ---------- search ----------
 
 // doSearch queries rm-search, replies with a result card, then optionally
 // follows up with an LLM summary message.
-func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) error {
+func (b *Bot) doSearch(ctx context.Context, t task, query string, offset int) error {
 	start := time.Now()
 	res, err := b.Search.Search(ctx, &rmsearch.SearchRequest{
 		Q:      query,
@@ -260,34 +337,34 @@ func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) er
 		Offset: offset,
 	})
 	if err != nil {
-		logrus.WithField("chat_id", chatID).
+		logrus.WithField("chat_id", t.ChatID).
 			Warnf("search %q (offset %d) failed after %s: %v",
 				query, offset, time.Since(start).Round(time.Millisecond), err)
-		return b.SendText(ctx, chatID, "搜索失败, 请稍后重试。")
+		return b.replyText(ctx, t, "搜索失败, 请稍后重试。")
 	}
 	logrus.WithFields(logrus.Fields{
-		"chat_id":  chatID,
+		"chat_id":  t.ChatID,
 		"duration": time.Since(start).Round(time.Millisecond).String(),
 		"hits":     len(res.Hits),
 		"total":    res.Total,
 	}).Infof("search %q (offset %d)", query, offset)
 
-	settings, err := b.Store.GetSettings(chatID, "p2p")
+	settings, err := b.Store.GetSettings(t.ChatID, "p2p")
 	if err != nil {
-		logrus.WithField("chat_id", chatID).Warnf("load settings failed, using defaults: %v", err)
+		logrus.WithField("chat_id", t.ChatID).Warnf("load settings failed, using defaults: %v", err)
 		settings = &store.Settings{SummaryOn: true}
 	}
 
-	b.rememberSearch(chatID, query, offset)
+	b.rememberSearch(t.ChatID, query, offset)
 
 	if len(res.Hits) == 0 {
 		if offset > 0 {
-			return b.SendCard(ctx, chatID, EmptyResultCard("没有更多结果了"))
+			return b.replyCard(ctx, t, EmptyResultCard("没有更多结果了"))
 		}
-		return b.SendCard(ctx, chatID, EmptyResultCard(query))
+		return b.replyCard(ctx, t, EmptyResultCard(query))
 	}
 
-	if err := b.SendCard(ctx, chatID, SearchResultCard(query, res, offset, ResultsPerPage, settings.SummaryOn)); err != nil {
+	if err := b.replyCard(ctx, t, SearchResultCard(query, res, offset, ResultsPerPage, settings.SummaryOn)); err != nil {
 		return fmt.Errorf("send result card: %w", err)
 	}
 
@@ -298,7 +375,7 @@ func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) er
 	if offset == 0 && settings.SummaryOn && b.LLM.Enabled() {
 		go func() {
 			defer recoverSilently("search summary")
-			b.sendSummaryWithRetry(chatID, query, res.Hits)
+			b.sendSummaryWithRetry(t, query, res.Hits)
 		}()
 	}
 	return nil
@@ -325,7 +402,7 @@ func summaryRetryDelay(i int) time.Duration {
 // sendSummaryWithRetry summarizes a search and sends the summary card,
 // retrying on failure with exponential backoff. After exhausting the
 // retries it logs the error and gives up silently.
-func (b *Bot) sendSummaryWithRetry(chatID, query string, hits []rmsearch.Document) {
+func (b *Bot) sendSummaryWithRetry(t task, query string, hits []rmsearch.Document) {
 	var (
 		text    string
 		lastErr error
@@ -340,35 +417,35 @@ func (b *Bot) sendSummaryWithRetry(chatID, query string, hits []rmsearch.Documen
 		cancel()
 		if lastErr == nil {
 			logrus.WithFields(logrus.Fields{
-				"chat_id":  chatID,
+				"chat_id":  t.ChatID,
 				"duration": time.Since(start).Round(time.Millisecond).String(),
 				"attempt":  attempt + 1,
 			}).Infof("search summary ready for %q", query)
 			break
 		}
-		logrus.WithField("chat_id", chatID).Warnf(
+		logrus.WithField("chat_id", t.ChatID).Warnf(
 			"search summary for %q attempt %d/%d failed after %s: %v",
 			query, attempt+1, summaryMaxRetries+1,
 			time.Since(start).Round(time.Millisecond), lastErr)
 	}
 	if lastErr != nil {
-		logrus.WithField("chat_id", chatID).Errorf(
+		logrus.WithField("chat_id", t.ChatID).Errorf(
 			"search summary for %q gave up after %d attempts: %v",
 			query, summaryMaxRetries+1, lastErr)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
-	if err := b.SendCard(ctx, chatID, SummaryCard(query, text)); err != nil {
-		logrus.WithField("chat_id", chatID).Warnf("send summary card failed: %v", err)
+	if err := b.replyCard(ctx, t, SummaryCard(query, text)); err != nil {
+		logrus.WithField("chat_id", t.ChatID).Warnf("send summary card failed: %v", err)
 	}
 }
 
 // doPage handles "下一页" / "上一页" / "第N页" style commands.
-func (b *Bot) doPage(ctx context.Context, chatID string, pageDeltaOrIndex pageRef) error {
-	state := b.recallSearch(chatID)
+func (b *Bot) doPage(ctx context.Context, t task, pageDeltaOrIndex pageRef) error {
+	state := b.recallSearch(t.ChatID)
 	if state == nil {
-		return b.SendText(ctx, chatID, "请先发送一个搜索关键词，再翻页。")
+		return b.replyText(ctx, t, "请先发送一个搜索关键词，再翻页。")
 	}
 	offset := 0
 	if pageDeltaOrIndex.absolute {
@@ -379,7 +456,7 @@ func (b *Bot) doPage(ctx context.Context, chatID string, pageDeltaOrIndex pageRe
 	if offset < 0 {
 		offset = 0
 	}
-	return b.doSearch(ctx, chatID, state.Query, offset)
+	return b.doSearch(ctx, t, state.Query, offset)
 }
 
 // rememberSearch stores the last query state of a chat.
@@ -404,12 +481,12 @@ func (b *Bot) recallSearch(chatID string) *searchState {
 
 // handleIntent applies a subscription/settings intent and confirms with the
 // settings card.
-func (b *Bot) handleIntent(ctx context.Context, chatID, chatType string, intent *Intent) error {
-	logrus.WithField("chat_id", chatID).Infof("intent kind=%d hasTime=%v time=%02d:%02d",
+func (b *Bot) handleIntent(ctx context.Context, t task, intent *Intent) error {
+	logrus.WithField("chat_id", t.ChatID).Infof("intent kind=%d hasTime=%v time=%02d:%02d",
 		intent.Kind, intent.HasTime, intent.Hour, intent.Minute)
 
 	// Make sure the chat has a settings row.
-	if _, err := b.Store.GetSettings(chatID, chatType); err != nil {
+	if _, err := b.Store.GetSettings(t.ChatID, t.ChatType); err != nil {
 		return fmt.Errorf("ensure settings: %w", err)
 	}
 
@@ -420,29 +497,29 @@ func (b *Bot) handleIntent(ctx context.Context, chatID, chatType string, intent 
 
 	switch intent.Kind {
 	case IntentUnsubscribe:
-		if err := b.Store.Unsubscribe(chatID); err != nil {
+		if err := b.Store.Unsubscribe(t.ChatID); err != nil {
 			return fmt.Errorf("unsubscribe: %w", err)
 		}
 	case IntentSummaryOn:
-		if err := b.Store.SetSummary(chatID, true); err != nil {
+		if err := b.Store.SetSummary(t.ChatID, true); err != nil {
 			return fmt.Errorf("set summary on: %w", err)
 		}
 	case IntentSummaryOff:
-		if err := b.Store.SetSummary(chatID, false); err != nil {
+		if err := b.Store.SetSummary(t.ChatID, false); err != nil {
 			return fmt.Errorf("set summary off: %w", err)
 		}
 	case IntentSubscribeDaily:
-		if err := b.Store.UpsertSubscription(chatID, store.FrequencyDaily, hour, minute); err != nil {
+		if err := b.Store.UpsertSubscription(t.ChatID, store.FrequencyDaily, hour, minute); err != nil {
 			return fmt.Errorf("subscribe daily: %w", err)
 		}
 	case IntentSubscribeWeekly:
-		if err := b.Store.UpsertSubscription(chatID, store.FrequencyWeekly, hour, minute); err != nil {
+		if err := b.Store.UpsertSubscription(t.ChatID, store.FrequencyWeekly, hour, minute); err != nil {
 			return fmt.Errorf("subscribe weekly: %w", err)
 		}
 	default:
 		return nil
 	}
-	return b.SendCard(ctx, chatID, SettingsCard(b.settingsView(chatID)))
+	return b.replyCard(ctx, t, SettingsCard(b.settingsView(t.ChatID)))
 }
 
 func (b *Bot) settingsView(chatID string) *store.Settings {
@@ -455,6 +532,32 @@ func (b *Bot) settingsView(chatID string) *store.Settings {
 }
 
 // ---------- sending ----------
+
+// atMarkup returns the lark_md mention of the asking user, empty in p2p
+// chats where an at would be noise.
+func (t task) atMarkup() string {
+	if t.ChatType == "group" && t.SenderID != "" {
+		return fmt.Sprintf(`<at user_id="%s"></at>`, t.SenderID)
+	}
+	return ""
+}
+
+// replyText sends a plain text message, mentioning the asker in groups.
+func (b *Bot) replyText(ctx context.Context, t task, text string) error {
+	if at := t.atMarkup(); at != "" {
+		text = at + " " + text
+	}
+	return b.SendText(ctx, t.ChatID, text)
+}
+
+// replyCard sends an interactive card, mentioning the asker in groups by
+// prepending an at element.
+func (b *Bot) replyCard(ctx context.Context, t task, card map[string]any) error {
+	if at := t.atMarkup(); at != "" {
+		prependAtElement(card, at)
+	}
+	return b.SendCard(ctx, t.ChatID, card)
+}
 
 // SendText sends a plain text message to a chat.
 func (b *Bot) SendText(ctx context.Context, chatID, text string) error {
@@ -557,9 +660,10 @@ func extractText(content *string, mentions []*larkim.MentionEvent) string {
 	return strings.TrimSpace(text)
 }
 
-func mentionsBot(mentions []*larkim.MentionEvent) bool {
+// mentionsSelf reports whether the mention list contains the given open_id.
+func mentionsSelf(mentions []*larkim.MentionEvent, openID string) bool {
 	for _, m := range mentions {
-		if m != nil && m.Id != nil && m.Id.OpenId != nil {
+		if m != nil && m.Id != nil && deref(m.Id.OpenId) == openID {
 			return true
 		}
 	}

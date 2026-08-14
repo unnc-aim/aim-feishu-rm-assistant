@@ -53,6 +53,27 @@ func clip(s string, n int) string {
 	return string(r[:n]) + "..."
 }
 
+// SanitizeSummary strips markdown emphasis the model tends to emit.
+// lark_md renders *word* and _word_ as italics, which reads as random
+// slanted text; bold pairs (**) are kept, lone asterisks and underscores
+// are neutralized so summaries render as plain text.
+func SanitizeSummary(s string) string {
+	const bold = "\x00"
+	s = strings.ReplaceAll(s, "**", bold)
+	s = strings.ReplaceAll(s, "*", "")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return strings.ReplaceAll(s, bold, "**")
+}
+
+// prependAtElement inserts an at markup div in front of the card content.
+func prependAtElement(card map[string]any, at string) {
+	elements, ok := card["elements"].([]map[string]any)
+	if !ok || len(elements) == 0 {
+		return
+	}
+	card["elements"] = append([]map[string]any{mdElement(at)}, elements...)
+}
+
 // ---------- cards ----------
 
 // SearchResultCard renders one page of search hits with pagination hints.
@@ -108,7 +129,7 @@ func SummaryCard(query, summary string) map[string]interface{} {
 		"config": map[string]interface{}{"wide_screen_mode": true},
 		"header": header("AI 总结", "turquoise"),
 		"elements": []map[string]interface{}{
-			mdElement(summary),
+			mdElement(SanitizeSummary(summary)),
 			note("由大模型生成, 仅供参考: " + escape(query)),
 		},
 	}
