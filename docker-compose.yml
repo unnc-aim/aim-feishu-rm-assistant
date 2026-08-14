@@ -1,0 +1,11 @@
+services:
+  assistant:
+    build: .
+    image: aim-feishu-rm-assistant:latest
+    container_name: aim-feishu-rm-assistant
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data:/data
