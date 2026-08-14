@@ -41,13 +41,13 @@ func (s *Scheduler) Start(ctx context.Context) {
 			logrus.Info("push scheduler stopped")
 			return
 		case <-ticker.C:
-			s.tick(ctx)
+			s.tick()
 		}
 	}
 }
 
 // tick evaluates all active subscriptions once.
-func (s *Scheduler) tick(ctx context.Context) {
+func (s *Scheduler) tick() {
 	defer func() {
 		if r := recover(); r != nil {
 			logrus.Errorf("panic in push scheduler tick: %v\n%s", r, debug.Stack())

@@ -24,9 +24,10 @@ type Config struct {
 	// SQLitePath is the file path of the SQLite database.
 	SQLitePath string
 
-	// LogPath is the file all logs (including every incoming user
-	// message) are written to, in addition to stderr.
-	LogPath string
+	// LogDir is the directory holding daily-rotated log files; every
+	// incoming user message and action is logged there in addition to
+	// stderr.
+	LogDir string
 
 	// PushDefaultHour and PushDefaultMinute are the local time-of-day used
 	// when a new subscription does not specify one.
@@ -44,7 +45,7 @@ func FromEnv() *Config {
 		LLMAPIKey:         os.Getenv("LLM_API_KEY"),
 		LLMModel:          envOr("LLM_MODEL", "gpt-4o-mini"),
 		SQLitePath:        envOr("SQLITE_PATH", "./data/assistant.db"),
-		LogPath:           envOr("LOG_PATH", "./data/assistant.log"),
+		LogDir:            envOr("LOG_DIR", "./data/logs"),
 		PushDefaultHour:   envInt("PUSH_DEFAULT_HOUR", 20),
 		PushDefaultMinute: envInt("PUSH_DEFAULT_MINUTE", 0),
 	}

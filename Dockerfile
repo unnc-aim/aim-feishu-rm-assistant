@@ -17,7 +17,7 @@ USER app
 COPY --from=builder /out/aim-feishu-rm-assistant /usr/local/bin/aim-feishu-rm-assistant
 
 ENV SQLITE_PATH=/data/assistant.db
-ENV LOG_PATH=/data/assistant.log
+ENV LOG_DIR=/data/logs
 VOLUME ["/data"]
 
 ENTRYPOINT ["aim-feishu-rm-assistant"]

@@ -26,7 +26,7 @@ func main() {
 	tz.ResolveLocal()
 
 	cfg := config.FromEnv()
-	logCloser, err := log.Setup(cfg.LogPath)
+	logCloser, err := log.Setup(cfg.LogDir)
 	if err != nil {
 		logrus.Fatalf("setup file logging: %v", err)
 	}
@@ -45,7 +45,7 @@ func main() {
 	}
 	defer st.Close()
 
-	logrus.Infof("logging to file %s", cfg.LogPath)
+	logrus.Infof("logging to daily files in %s", cfg.LogDir)
 
 	larkClient := lark.NewClient(cfg.AppID, cfg.AppSecret,
 		lark.WithReqTimeout(15*time.Second))
