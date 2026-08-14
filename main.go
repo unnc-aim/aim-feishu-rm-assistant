@@ -11,19 +11,26 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/sirupsen/logrus"
 
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/bot"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/config"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/llm"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/push"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/rmsearch"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/store"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/tz"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/bot"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/config"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/llm"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/log"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/push"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/rmsearch"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/store"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/tz"
 )
 
 func main() {
 	tz.ResolveLocal()
 
 	cfg := config.FromEnv()
+	logCloser, err := log.Setup(cfg.LogPath)
+	if err != nil {
+		logrus.Fatalf("setup file logging: %v", err)
+	}
+	defer logCloser.Close()
+
 	if err := cfg.Validate(); err != nil {
 		logrus.Fatal(err)
 	}
@@ -36,6 +43,8 @@ func main() {
 		logrus.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+
+	logrus.Infof("logging to file %s", cfg.LogPath)
 
 	larkClient := lark.NewClient(cfg.AppID, cfg.AppSecret)
 	searchClient := rmsearch.NewClient(cfg.RmSearchBaseURL)

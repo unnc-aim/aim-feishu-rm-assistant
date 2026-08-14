@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/store"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/store"
 )
 
 func dailySub() *store.Settings {

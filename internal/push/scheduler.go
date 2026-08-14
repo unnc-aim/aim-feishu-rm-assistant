@@ -7,8 +7,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/bot"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/store"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/bot"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/store"
 )
 
 // Scheduler periodically checks subscriptions and sends digests.

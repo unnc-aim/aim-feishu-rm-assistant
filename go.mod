@@ -1,4 +1,4 @@
-module github.com/UNNC-AIM/aim-feishu-rm-assistant
+module github.com/unnc-aim/aim-feishu-rm-assistant
 
 go 1.25.0
 

@@ -47,6 +47,7 @@
 | `LLM_API_KEY` | 大模型 API Key | 空 (为空时摘要降级) |
 | `LLM_MODEL` | 模型名 | `gpt-4o-mini` |
 | `SQLITE_PATH` | SQLite 数据库路径 | `./data/assistant.db` |
+| `LOG_PATH` | 日志文件路径, 所有用户消息与操作均写入 | `./data/assistant.log` |
 | `PUSH_DEFAULT_HOUR` | 新订阅默认推送小时 | `20` |
 | `PUSH_DEFAULT_MINUTE` | 新订阅默认推送分钟 | `0` |
 | `TZ` | 时区覆盖, 留空跟随宿主机 | 空 |

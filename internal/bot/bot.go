@@ -21,9 +21,9 @@ import (
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 	"github.com/sirupsen/logrus"
 
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/llm"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/rmsearch"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/store"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/llm"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/rmsearch"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/store"
 )
 
 // ResultsPerPage is the page size of search result cards.
@@ -100,6 +100,13 @@ func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageRecei
 		return nil
 	}
 
+	// Every user question/command is logged (to stderr and the log file).
+	logrus.WithFields(logrus.Fields{
+		"chat_id":   chatID,
+		"chat_type": chatType,
+		"msg_type":  deref(msg.MessageType),
+	}).Infof("received message: %s", clip(text, 200))
+
 	if strings.TrimSpace(text) == "" {
 		return b.SendText(ctx, chatID, "请发送关键词开始搜索，或回复“帮助”查看用法。")
 	}
@@ -124,6 +131,7 @@ func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageRecei
 // doSearch queries rm-search, replies with a result card, then optionally
 // follows up with an LLM summary message.
 func (b *Bot) doSearch(ctx context.Context, chatID, query string, offset int) error {
+	logrus.WithField("chat_id", chatID).Infof("search %q (offset %d)", query, offset)
 	res, err := b.Search.Search(ctx, &rmsearch.SearchRequest{
 		Q:      query,
 		Limit:  ResultsPerPage,
@@ -247,6 +255,8 @@ func (b *Bot) recallSearch(chatID string) *searchState {
 // handleIntent applies a subscription/settings intent and confirms with the
 // settings card.
 func (b *Bot) handleIntent(ctx context.Context, chatID, chatType string, intent *Intent) error {
+	logrus.WithField("chat_id", chatID).Infof("intent kind=%d hasTime=%v time=%02d:%02d",
+		intent.Kind, intent.HasTime, intent.Hour, intent.Minute)
 	// Make sure the chat has a settings row.
 	if _, err := b.Store.GetSettings(chatID, chatType); err != nil {
 		return err
@@ -311,7 +321,7 @@ func (b *Bot) SendText(ctx context.Context, chatID, text string) error {
 }
 
 // SendCard sends an interactive card to a chat.
-func (b *Bot) SendCard(ctx context.Context, chatID string, card map[string]interface{}) error {
+func (b *Bot) SendCard(ctx context.Context, chatID string, card map[string]any) error {
 	content, err := json.Marshal(card)
 	if err != nil {
 		return err

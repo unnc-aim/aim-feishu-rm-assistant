@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/llm"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/rmsearch"
-	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/store"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/llm"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/rmsearch"
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/store"
 )
 
 // ---------- helpers ----------
