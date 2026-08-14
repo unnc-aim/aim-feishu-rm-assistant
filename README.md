@@ -49,7 +49,7 @@
 | `SQLITE_PATH` | SQLite 数据库路径 | `./data/assistant.db` |
 | `PUSH_DEFAULT_HOUR` | 新订阅默认推送小时 | `20` |
 | `PUSH_DEFAULT_MINUTE` | 新订阅默认推送分钟 | `0` |
-| `TZ` | 时区 | `Asia/Shanghai` |
+| `TZ` | 时区覆盖, 留空跟随宿主机 | 空 |
 
 大模型仅用于摘要: 搜索结果的总结、推送条目的挑选与摘要。模型不会调用任何工具, 所有内容均来自 RM Search 接口返回。
 
@@ -62,6 +62,13 @@ cp .env.example .env
 # 填写 FEISHU_APP_ID / FEISHU_APP_SECRET / LLM_API_KEY
 docker compose up -d --build
 ```
+
+时区处理 (同时支持 macOS 与 Debian Linux):
+
+- compose 已默认以只读方式挂载宿主机的 `/etc/localtime` 与 `/etc/timezone`, 程序按 `TZ 环境变量 → /etc/localtime (符号链接名, 或与镜像内 tz 数据库字节比对) → /etc/timezone → UTC` 的优先级解析, macOS Docker Desktop 与 Debian 宿主机均可直接跟随系统时区。
+- 在 `.env` 里设置 `TZ=Asia/Shanghai` 可显式覆盖; 留空则跟随宿主机。
+- 注意: macOS Docker Desktop 会合成一个内容为 VM 默认值 (`Etc/UTC`) 的 `/etc/timezone`, 因此解析优先级刻意将 `/etc/localtime` 排在它之前 (见 `internal/tz`)。
+- 启动日志会打印 `timezone resolved: ... (via ...)` 及来源, 便于确认配置生效。
 
 ### 本地运行
 

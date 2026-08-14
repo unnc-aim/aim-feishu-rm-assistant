@@ -6,6 +6,16 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      TZ: ${TZ:-Asia/Shanghai}
+      # TZ overrides the host zone resolution; keep it empty to follow the
+      # mounted /etc files below (works on macOS Docker Desktop and on
+      # Debian/Ubuntu hosts).
+      TZ: ${TZ:-}
     volumes:
       - ./data:/data
+      # Expose the host timezone so the scheduler resolves its local zone.
+      # On Linux these are the system zone files; on macOS Docker Desktop
+      # they are special-cased to the host's zone (note: /etc/timezone
+      # there carries the VM default, so the app trusts /etc/localtime
+      # first, see internal/tz).
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro

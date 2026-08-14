@@ -17,9 +17,12 @@ import (
 	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/push"
 	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/rmsearch"
 	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/store"
+	"github.com/UNNC-AIM/aim-feishu-rm-assistant/internal/tz"
 )
 
 func main() {
+	tz.ResolveLocal()
+
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
 		logrus.Fatal(err)
