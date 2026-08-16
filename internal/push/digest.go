@@ -28,8 +28,36 @@ type selection struct {
 	Reason string `json:"reason"`
 }
 
-// BuildDigest assembles the periodic digest card for [start, end).
-func (s *Scheduler) BuildDigest(ctx context.Context, start, end time.Time) (map[string]interface{}, error) {
+// windowData bundles the fetched content of one digest window.
+type windowData struct {
+	Start     time.Time
+	End       time.Time
+	Announces []rmsearch.Document
+	Forums    []rmsearch.Document
+}
+
+// BuildDigest assembles the digest card for the primary window [start,
+// end), optionally followed by a secondary window block (e.g. this week
+// for daily pushes, this month for weekly pushes). Empty windows are
+// rendered as reminders, never skipped.
+func (s *Scheduler) BuildDigest(ctx context.Context, start, end time.Time, secLabel string, secStart, secEnd time.Time) (map[string]interface{}, error) {
+	primary, err := s.fetchWindow(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+
+	var secondary *windowData
+	if secLabel != "" && !secStart.IsZero() && secEnd.After(secStart) {
+		if secondary, err = s.fetchWindow(ctx, secStart, secEnd); err != nil {
+			return nil, fmt.Errorf("fetch secondary window: %w", err)
+		}
+	}
+
+	return s.renderDigest(ctx, primary, secLabel, secondary), nil
+}
+
+// fetchWindow pulls announcements and forum posts created in [start, end).
+func (s *Scheduler) fetchWindow(ctx context.Context, start, end time.Time) (*windowData, error) {
 	startMS := start.UnixMilli()
 	endMS := end.UnixMilli()
 
@@ -59,7 +87,7 @@ func (s *Scheduler) BuildDigest(ctx context.Context, start, end time.Time) (map[
 	announces = before(endMS, announces)
 	forums = before(endMS, forums)
 
-	return s.renderDigest(ctx, start, end, announces, forums), nil
+	return &windowData{Start: start, End: end, Announces: announces, Forums: forums}, nil
 }
 
 func before(endMS int64, docs []rmsearch.Document) []rmsearch.Document {
@@ -72,99 +100,23 @@ func before(endMS int64, docs []rmsearch.Document) []rmsearch.Document {
 	return out
 }
 
-func (s *Scheduler) renderDigest(ctx context.Context, start, end time.Time, announces, forums []rmsearch.Document) map[string]interface{} {
+func (s *Scheduler) renderDigest(ctx context.Context, primary *windowData, secLabel string, secondary *windowData) map[string]interface{} {
 	title := "RM 日报"
-	if end.Sub(start) > 48*time.Hour {
+	if primary.End.Sub(primary.Start) > 48*time.Hour {
 		title = "RM 周报"
 	}
-	subtitle := fmt.Sprintf("%s ~ %s",
-		start.In(time.Local).Format("01-02 15:04"), end.In(time.Local).Format("01-02 15:04"))
 
-	llmReady := s.Bot.LLM.Enabled()
-
-	// Announcements are few; keep them all (newest first).
-	sortByTimeDesc(announces)
-
-	// Forum picks: LLM selects pickLimit items from the candidate pool,
-	// falling back to newest-first when the LLM is unavailable or fails.
-	picked := forums
-	pickReasons := map[int]string{}
-	if len(forums) > pickLimit {
-		picked = forums[:pickLimit]
-		if llmReady {
-			t2 := time.Now()
-			selections, err := selectPicks(ctx, s.Bot.LLM, forums, pickLimit)
-			if err != nil {
-				logrus.Warnf("digest stage: llm pick failed after %s, fallback to newest: %v",
-					time.Since(t2).Round(time.Millisecond), err)
-			} else if len(selections) > 0 {
-				var subset []rmsearch.Document
-				for _, sel := range selections {
-					if sel.Index >= 0 && sel.Index < len(forums) {
-						subset = append(subset, forums[sel.Index])
-						pickReasons[sel.Index] = sel.Reason
-					}
-				}
-				if len(subset) > 0 {
-					picked = subset
-				}
-			}
-			logrus.WithFields(logrus.Fields{
-				"duration": time.Since(t2).Round(time.Millisecond).String(),
-				"picked":   len(picked),
-			}).Info("digest stage: llm pick done")
-		}
+	elements := []map[string]interface{}{
+		mdElement(fmt.Sprintf("%s ~ %s",
+			primary.Start.In(time.Local).Format("01-02 15:04"), primary.End.In(time.Local).Format("01-02 15:04"))),
 	}
+	elements = append(elements, s.windowElements(ctx, primary)...)
 
-	var summaryText string
-	var summaryErr error
-	switch {
-	case len(announces) == 0 && len(picked) == 0:
-		// Nothing new in the window: skip the LLM entirely so the digest
-		// returns in sub-second instead of waiting on a model call with
-		// empty material.
-		logrus.Info("digest stage: no new content, skipping llm summary")
-	case llmReady:
-		t3 := time.Now()
-		summaryText, summaryErr = digestSummary(ctx, s.Bot.LLM, title, announces, picked)
-		logrus.WithFields(logrus.Fields{
-			"duration": time.Since(t3).Round(time.Millisecond).String(),
-			"failed":   summaryErr != nil,
-		}).Info("digest stage: llm summary done")
-	default:
-		summaryErr = fmt.Errorf("LLM 未配置")
-	}
-
-	elements := []map[string]interface{}{mdElement(subtitle)}
-	if len(announces) == 0 && len(picked) == 0 {
-		elements = append(elements, mdElement("本时段没有新的公告或论坛内容。"))
-	}
-
-	if summaryErr != nil {
-		elements = append(elements, mdElement("AI 摘要暂不可用, 以下为原始条目列表。"))
-	} else if summaryText != "" {
-		elements = append(elements, mdElement(bot.SanitizeSummary(summaryText)), divider())
-	}
-
-	elements = append(elements, mdElement(fmt.Sprintf("**官网公告** (%d)", len(announces))))
-	if len(announces) == 0 {
-		elements = append(elements, mdElement("本时段没有新公告"))
-	}
-	for i, a := range announces {
-		if i >= pickLimit {
-			break
-		}
-		elements = append(elements, mdElement(fmt.Sprintf("- [%s](%s) (%s)",
-			escape(a.Title), a.URL, time.UnixMilli(a.CreateTimeMS).In(time.Local).Format("01-02"))))
-	}
-
-	elements = append(elements, divider(), mdElement(fmt.Sprintf("**论坛精选** (%d)", len(picked))))
-	if len(picked) == 0 {
-		elements = append(elements, mdElement("本时段没有新帖子"))
-	}
-	for _, f := range picked {
-		elements = append(elements, mdElement(fmt.Sprintf("- [%s](%s) · %s · %s",
-			escape(f.Title), f.URL, escape(f.Source), escape(f.Author))))
+	if secondary != nil {
+		elements = append(elements, divider(),
+			mdElement(fmt.Sprintf("**%s** (%s ~ %s)", secLabel,
+				secondary.Start.In(time.Local).Format("01-02"), secondary.End.In(time.Local).Format("01-02 15:04"))))
+		elements = append(elements, s.windowElements(ctx, secondary)...)
 	}
 
 	elements = append(elements, noteEl("数据来源: RM Search · 摘要由大模型生成, 仅供参考"))
@@ -174,6 +126,97 @@ func (s *Scheduler) renderDigest(ctx context.Context, start, end time.Time, anno
 		"header":   headerEl(title, "green"),
 		"elements": elements,
 	}
+}
+
+// windowElements renders one window: empty reminder or AI summary, then
+// the announcement and forum pick sections.
+func (s *Scheduler) windowElements(ctx context.Context, w *windowData) []map[string]interface{} {
+	llmReady := s.Bot.LLM.Enabled()
+
+	sortByTimeDesc(w.Announces)
+	picked := s.pickForums(ctx, w.Forums, llmReady)
+
+	var elements []map[string]interface{}
+
+	if len(w.Announces) == 0 && len(picked) == 0 {
+		elements = append(elements, mdElement("本时段没有新的公告或论坛内容。"))
+	} else if summaryText, err := s.windowSummary(ctx, w, picked, llmReady); err == nil && summaryText != "" {
+		elements = append(elements, mdElement(bot.SanitizeSummary(summaryText)))
+	} else if err != nil {
+		logrus.Warnf("digest stage: llm summary failed, degrading to list: %v", err)
+		elements = append(elements, mdElement("AI 摘要暂不可用, 以下为原始条目列表。"))
+	}
+	elements = append(elements, divider())
+
+	elements = append(elements, mdElement(fmt.Sprintf("**官网公告** (%d)", len(w.Announces))))
+	if len(w.Announces) == 0 {
+		elements = append(elements, mdElement("无"))
+	}
+	for i, a := range w.Announces {
+		if i >= pickLimit {
+			break
+		}
+		elements = append(elements, mdElement(fmt.Sprintf("- [%s](%s) (%s)",
+			escape(a.Title), a.URL, time.UnixMilli(a.CreateTimeMS).In(time.Local).Format("01-02"))))
+	}
+
+	elements = append(elements, mdElement(fmt.Sprintf("**论坛精选** (%d)", len(picked))))
+	if len(picked) == 0 {
+		elements = append(elements, mdElement("无"))
+	}
+	for _, f := range picked {
+		elements = append(elements, mdElement(fmt.Sprintf("- [%s](%s) · %s · %s",
+			escape(f.Title), f.URL, escape(f.Source), escape(f.Author))))
+	}
+	return elements
+}
+
+// pickForums selects the most valuable forum posts with LLM help,
+// falling back to newest-first.
+func (s *Scheduler) pickForums(ctx context.Context, forums []rmsearch.Document, llmReady bool) []rmsearch.Document {
+	if len(forums) <= pickLimit {
+		return forums
+	}
+	picked := forums[:pickLimit]
+	if !llmReady {
+		return picked
+	}
+	t2 := time.Now()
+	selections, err := selectPicks(ctx, s.Bot.LLM, forums, pickLimit)
+	if err != nil {
+		logrus.Warnf("digest stage: llm pick failed after %s, fallback to newest: %v",
+			time.Since(t2).Round(time.Millisecond), err)
+		return picked
+	}
+	var subset []rmsearch.Document
+	for _, sel := range selections {
+		if sel.Index >= 0 && sel.Index < len(forums) {
+			subset = append(subset, forums[sel.Index])
+		}
+	}
+	logrus.WithFields(logrus.Fields{
+		"duration": time.Since(t2).Round(time.Millisecond).String(),
+		"picked":   len(subset),
+	}).Info("digest stage: llm pick done")
+	if len(subset) > 0 {
+		return subset
+	}
+	return picked
+}
+
+// windowSummary summarizes one window; empty windows skip the LLM
+// entirely so the digest stays sub-second.
+func (s *Scheduler) windowSummary(ctx context.Context, w *windowData, picked []rmsearch.Document, llmReady bool) (string, error) {
+	if !llmReady {
+		return "", fmt.Errorf("LLM 未配置")
+	}
+	t3 := time.Now()
+	text, err := digestSummary(ctx, s.Bot.LLM, w.Start, w.End, w.Announces, picked)
+	logrus.WithFields(logrus.Fields{
+		"duration": time.Since(t3).Round(time.Millisecond).String(),
+		"failed":   err != nil,
+	}).Info("digest stage: llm summary done")
+	return text, err
 }
 
 // selectPicks asks the LLM to choose the most valuable items from the
@@ -206,7 +249,7 @@ func selectPicks(ctx context.Context, client *llm.Client, docs []rmsearch.Docume
 }
 
 // digestSummary generates the overview-then-bullets summary of a digest.
-func digestSummary(ctx context.Context, client *llm.Client, title string, announces, forums []rmsearch.Document) (string, error) {
+func digestSummary(ctx context.Context, client *llm.Client, start, end time.Time, announces, forums []rmsearch.Document) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("官网公告:\n")
 	for _, a := range announces {
@@ -216,8 +259,9 @@ func digestSummary(ctx context.Context, client *llm.Client, title string, announ
 	for _, f := range forums {
 		sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", f.Source, f.Title, clipRunes(f.Content, 200)))
 	}
-	system := "你是一个 RoboMaster 赛事社区的日报编辑。根据给定材料写一段摘要: 先用 2-3 句话综述本时段最重要动态, 然后按公告和论坛分别用一句话列出每条要点。使用 Markdown, 不要使用标题, 内容使用中文, 总长控制在 300 字左右。"
-	user := fmt.Sprintf("%s 材料:\n\n%s", title, sb.String())
+	system := "你是一个 RoboMaster 赛事社区的日报编辑。根据给定材料写一段摘要: 先用 2-3 句话综述该时段最重要动态, 然后按公告和论坛分别用一句话列出每条要点。使用 Markdown, 不要使用标题, 内容使用中文, 总长控制在 300 字左右。"
+	user := fmt.Sprintf("时段 %s ~ %s 的材料:\n\n%s",
+		start.Format("01-02 15:04"), end.Format("01-02 15:04"), sb.String())
 	return client.Chat(ctx, system, user)
 }
 

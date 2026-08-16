@@ -61,7 +61,7 @@ func main() {
 		b.ManualDigest = func(ctx context.Context, chatID string) error {
 			end := time.Now()
 			start := end.Add(-24 * time.Hour)
-			card, err := s.BuildDigest(ctx, start, end)
+			card, err := s.BuildDigest(ctx, start, end, "本周动态", push.WeekStart(end), end)
 			if err != nil {
 				return err
 			}

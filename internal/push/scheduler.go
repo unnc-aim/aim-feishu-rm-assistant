@@ -209,7 +209,21 @@ func (s *Scheduler) pushOne(ctx context.Context, sub *store.Settings, now time.T
 		"window":  start.Format("01-02 15:04") + " ~ " + end.Format("01-02 15:04"),
 	}).Infof("building %s digest", sub.Frequency)
 
-	card, err := s.BuildDigest(ctx, start, end)
+	// Secondary window: this week so far for daily pushes, this month so
+	// far for weekly pushes.
+	var secLabel string
+	var secStart, secEnd time.Time
+	if sub.Frequency == store.FrequencyWeekly {
+		secLabel = "本月动态"
+		secStart = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		secEnd = now
+	} else {
+		secLabel = "本周动态"
+		secStart = WeekStart(now)
+		secEnd = now
+	}
+
+	card, err := s.BuildDigest(ctx, start, end, secLabel, secStart, secEnd)
 	if err != nil {
 		return err
 	}
@@ -230,6 +244,16 @@ func (s *Scheduler) markOnly(chatID string) error {
 	// MarkPushed with the same window would violate the unique constraint,
 	// so refill last_push_at without inserting a push_log row.
 	return s.Store.TouchLastPush(chatID)
+}
+
+// WeekStart returns the Monday 00:00 of the week containing t.
+func WeekStart(t time.Time) time.Time {
+	weekday := int(t.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	monday := t.AddDate(0, 0, -(weekday - 1))
+	return time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, t.Location())
 }
 
 // windowOf returns the period a push covers.
