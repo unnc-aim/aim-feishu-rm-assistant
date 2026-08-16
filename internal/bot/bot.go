@@ -465,14 +465,21 @@ func (b *Bot) manualDigest(ctx context.Context, t task) error {
 	}
 	go func() {
 		defer recoverSilently("manual digest")
+		start := time.Now()
 		mctx, cancel := context.WithTimeout(context.Background(), pushPipelineTimeout)
 		defer cancel()
 		if err := b.ManualDigest(mctx, t.ChatID); err != nil {
-			logrus.WithField("chat_id", t.ChatID).Errorf("manual digest failed: %v", err)
+			logrus.WithField("chat_id", t.ChatID).Errorf("manual digest failed after %s: %v",
+				time.Since(start).Round(time.Millisecond), err)
 			sctx, scancel := context.WithTimeout(context.Background(), sendTimeout)
 			defer scancel()
 			_ = b.replyText(sctx, t, "推送生成失败: "+clip(err.Error(), 120))
+			return
 		}
+		logrus.WithFields(logrus.Fields{
+			"chat_id":  t.ChatID,
+			"duration": time.Since(start).Round(time.Millisecond).String(),
+		}).Info("manual digest sent")
 	}()
 	return nil
 }

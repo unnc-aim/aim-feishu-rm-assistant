@@ -33,15 +33,27 @@ func (s *Scheduler) BuildDigest(ctx context.Context, start, end time.Time) (map[
 	startMS := start.UnixMilli()
 	endMS := end.UnixMilli()
 
+	t0 := time.Now()
 	announces, err := s.Bot.Search.LatestSince(ctx, []string{rmsearch.SourceAnnounce}, startMS, announceCandidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch announces: %w", err)
 	}
+	logrus.WithFields(logrus.Fields{
+		"duration": time.Since(t0).Round(time.Millisecond).String(),
+		"count":    len(announces),
+	}).Info("digest stage: fetched announces")
+
+	t1 := time.Now()
 	forums, err := s.Bot.Search.LatestSince(ctx,
 		[]string{rmsearch.SourceArticle, rmsearch.SourceFAQ, rmsearch.SourceWiki}, startMS, forumCandidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch forum posts: %w", err)
 	}
+	logrus.WithFields(logrus.Fields{
+		"duration": time.Since(t1).Round(time.Millisecond).String(),
+		"count":    len(forums),
+	}).Info("digest stage: fetched forum posts")
+
 	// Filter the upper bound client-side: the API filter only supports
 	// create_time > start, and late-indexed older items may leak in.
 	announces = before(endMS, announces)
@@ -80,9 +92,11 @@ func (s *Scheduler) renderDigest(ctx context.Context, start, end time.Time, anno
 	if len(forums) > pickLimit {
 		picked = forums[:pickLimit]
 		if llmReady {
+			t2 := time.Now()
 			selections, err := selectPicks(ctx, s.Bot.LLM, forums, pickLimit)
 			if err != nil {
-				logrus.Warnf("llm pick failed, fallback to newest: %v", err)
+				logrus.Warnf("digest stage: llm pick failed after %s, fallback to newest: %v",
+					time.Since(t2).Round(time.Millisecond), err)
 			} else if len(selections) > 0 {
 				var subset []rmsearch.Document
 				for _, sel := range selections {
@@ -95,18 +109,36 @@ func (s *Scheduler) renderDigest(ctx context.Context, start, end time.Time, anno
 					picked = subset
 				}
 			}
+			logrus.WithFields(logrus.Fields{
+				"duration": time.Since(t2).Round(time.Millisecond).String(),
+				"picked":   len(picked),
+			}).Info("digest stage: llm pick done")
 		}
 	}
 
 	var summaryText string
 	var summaryErr error
-	if llmReady {
+	switch {
+	case len(announces) == 0 && len(picked) == 0:
+		// Nothing new in the window: skip the LLM entirely so the digest
+		// returns in sub-second instead of waiting on a model call with
+		// empty material.
+		logrus.Info("digest stage: no new content, skipping llm summary")
+	case llmReady:
+		t3 := time.Now()
 		summaryText, summaryErr = digestSummary(ctx, s.Bot.LLM, title, announces, picked)
-	} else {
+		logrus.WithFields(logrus.Fields{
+			"duration": time.Since(t3).Round(time.Millisecond).String(),
+			"failed":   summaryErr != nil,
+		}).Info("digest stage: llm summary done")
+	default:
 		summaryErr = fmt.Errorf("LLM 未配置")
 	}
 
 	elements := []map[string]interface{}{mdElement(subtitle)}
+	if len(announces) == 0 && len(picked) == 0 {
+		elements = append(elements, mdElement("本时段没有新的公告或论坛内容。"))
+	}
 
 	if summaryErr != nil {
 		elements = append(elements, mdElement("AI 摘要暂不可用, 以下为原始条目列表。"))
