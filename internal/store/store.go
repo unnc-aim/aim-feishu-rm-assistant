@@ -144,17 +144,20 @@ func (s *Store) SetSummary(chatID string, on bool) error {
 }
 
 // UpsertSubscription inserts or updates a subscription of a chat.
+// last_push_at starts at now so a new or edited subscription first fires
+// at its NEXT slot instead of immediately replaying a past window.
 func (s *Store) UpsertSubscription(chatID, frequency string, hour, minute int) error {
 	_, err := s.db.Exec(`
-INSERT INTO subscriptions (chat_id, frequency, push_hour, push_minute, enabled, updated_at)
-VALUES (?, ?, ?, ?, 1, ?)
+INSERT INTO subscriptions (chat_id, frequency, push_hour, push_minute, enabled, last_push_at, updated_at)
+VALUES (?, ?, ?, ?, 1, ?, ?)
 ON CONFLICT(chat_id) DO UPDATE SET
     frequency = excluded.frequency,
     push_hour = excluded.push_hour,
     push_minute = excluded.push_minute,
     enabled = 1,
+    last_push_at = excluded.last_push_at,
     updated_at = excluded.updated_at`,
-		chatID, frequency, hour, minute, time.Now().Unix())
+		chatID, frequency, hour, minute, time.Now().Unix(), time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("upsert subscription: %w", err)
 	}

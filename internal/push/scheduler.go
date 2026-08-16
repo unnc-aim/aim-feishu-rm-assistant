@@ -33,8 +33,10 @@ type Scheduler struct {
 
 // Start runs the scheduling loop until ctx is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
+	s.logSchedule()
 	ticker := time.NewTicker(pushCheckInterval)
 	defer ticker.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -42,8 +44,62 @@ func (s *Scheduler) Start(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.tick()
+			// Heartbeat so a dead or idle scheduler is visible in logs.
+			ticks++
+			if ticks%20 == 0 { // every ~10 minutes
+				subs, err := s.Store.ActiveSubscriptions()
+				if err != nil {
+					logrus.Errorf("heartbeat: load subscriptions: %v", err)
+					break
+				}
+				logrus.Infof("push scheduler alive, %d active subscriptions", len(subs))
+			}
 		}
 	}
+}
+
+// logSchedule logs each active subscription and when it fires next, so
+// timezone or configuration mistakes surface at startup.
+func (s *Scheduler) logSchedule() {
+	subs, err := s.Store.ActiveSubscriptions()
+	if err != nil {
+		logrus.Errorf("log schedule: %v", err)
+		return
+	}
+	if len(subs) == 0 {
+		logrus.Info("push scheduler started, no active subscriptions yet")
+		return
+	}
+	for _, sub := range subs {
+		logrus.WithFields(logrus.Fields{
+			"chat_id":   sub.ChatID,
+			"frequency": sub.Frequency,
+			"next_fire": nextFire(sub, time.Now()).Format("2006-01-02 15:04 Mon"),
+		}).Infof("subscription scheduled at %02d:%02d local", sub.PushHour, sub.PushMinute)
+	}
+}
+
+// nextFire returns when the subscription fires next in local time.
+func nextFire(sub *store.Settings, now time.Time) time.Time {
+	today := time.Date(now.Year(), now.Month(), now.Day(),
+		sub.PushHour, sub.PushMinute, 0, 0, now.Location())
+	if sub.Frequency == store.FrequencyWeekly {
+		weekday := int(now.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		monday := now.AddDate(0, 0, -(weekday - 1))
+		weekSlot := time.Date(monday.Year(), monday.Month(), monday.Day(),
+			sub.PushHour, sub.PushMinute, 0, 0, now.Location())
+		if now.Before(weekSlot) {
+			return weekSlot
+		}
+		return weekSlot.AddDate(0, 0, 7)
+	}
+	if now.Before(today) {
+		return today
+	}
+	return today.AddDate(0, 0, 1)
 }
 
 // tick evaluates all active subscriptions once.

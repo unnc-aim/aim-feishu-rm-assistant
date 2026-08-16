@@ -94,6 +94,10 @@ type Bot struct {
 	botInfoMu      sync.Mutex
 	botOpenID      string
 	botInfoLastTry time.Time
+
+	// ManualDigest, when wired, builds and sends a digest for the past 24h
+	// on demand ("测试推送"), used to verify the push pipeline end to end.
+	ManualDigest func(ctx context.Context, chatID string) error
 }
 
 // New creates a Bot and starts its worker pool.
@@ -312,6 +316,11 @@ func (b *Bot) handleText(ctx context.Context, t task) error {
 		return b.replyCard(ctx, t, HelpCard())
 	}
 
+	// Manual digest trigger verifies the push pipeline end to end.
+	if t.Text == "测试推送" || t.Text == "立即推送" {
+		return b.manualDigest(ctx, t)
+	}
+
 	// Pagination commands act on the previous query of this chat.
 	if page, ok := parsePageCommand(t.Text); ok {
 		return b.doPage(ctx, t, page)
@@ -439,6 +448,33 @@ func (b *Bot) sendSummaryWithRetry(t task, query string, hits []rmsearch.Documen
 	if err := b.replyCard(ctx, t, SummaryCard(query, text)); err != nil {
 		logrus.WithField("chat_id", t.ChatID).Warnf("send summary card failed: %v", err)
 	}
+}
+
+// pushPipelineTimeout bounds a manual digest build, matching the scheduler
+// push timeout.
+const pushPipelineTimeout = 5 * time.Minute
+
+// manualDigest triggers an immediate digest build for the past 24h so the
+// push pipeline can be verified without waiting for the schedule.
+func (b *Bot) manualDigest(ctx context.Context, t task) error {
+	if b.ManualDigest == nil {
+		return b.replyText(ctx, t, "推送组件未就绪。")
+	}
+	if err := b.replyText(ctx, t, "正在生成最近 24 小时的推送, 请稍候..."); err != nil {
+		return err
+	}
+	go func() {
+		defer recoverSilently("manual digest")
+		mctx, cancel := context.WithTimeout(context.Background(), pushPipelineTimeout)
+		defer cancel()
+		if err := b.ManualDigest(mctx, t.ChatID); err != nil {
+			logrus.WithField("chat_id", t.ChatID).Errorf("manual digest failed: %v", err)
+			sctx, scancel := context.WithTimeout(context.Background(), sendTimeout)
+			defer scancel()
+			_ = b.replyText(sctx, t, "推送生成失败: "+clip(err.Error(), 120))
+		}
+	}()
+	return nil
 }
 
 // doPage handles "下一页" / "上一页" / "第N页" style commands.

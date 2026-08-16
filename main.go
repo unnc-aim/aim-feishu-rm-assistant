@@ -58,6 +58,15 @@ func main() {
 
 	go func() {
 		s := &push.Scheduler{Bot: b, Store: st}
+		b.ManualDigest = func(ctx context.Context, chatID string) error {
+			end := time.Now()
+			start := end.Add(-24 * time.Hour)
+			card, err := s.BuildDigest(ctx, start, end)
+			if err != nil {
+				return err
+			}
+			return b.SendCard(ctx, chatID, card)
+		}
 		s.Start(ctx)
 	}()
 
