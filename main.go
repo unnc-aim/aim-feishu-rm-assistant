@@ -73,8 +73,34 @@ func main() {
 	wsClient := b.NewWSClient()
 
 	logrus.Info("starting feishu rm assistant")
-	if err := wsClient.Start(ctx); err != nil {
+
+	// The SDK's Start ends with a bare select{} and never returns on ctx
+	// cancellation, so it must run in its own goroutine; shutdown is driven
+	// by the signal context below instead of Start returning.
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- wsClient.Start(ctx)
+	}()
+
+	select {
+	case err := <-startErr:
+		// Start only returns on connect failure; a nil return should not
+		// happen but is treated as a fatal exit either way.
 		logrus.Errorf("ws client exited: %v", err)
 		os.Exit(1)
+	case <-ctx.Done():
+		logrus.Info("shutdown signal received, closing websocket")
 	}
+
+	wsClient.Close()
+
+	// Hard-exit watchdog: if any deferred cleanup hangs, the process still
+	// exits well within the docker stop grace period instead of being
+	// SIGKILLed after 10s.
+	time.AfterFunc(5*time.Second, func() {
+		logrus.Warn("graceful shutdown timed out, forcing exit")
+		os.Exit(0)
+	})
+
+	logrus.Info("shutdown complete")
 }

@@ -4,6 +4,9 @@ services:
     image: aim-feishu-rm-assistant:latest
     container_name: aim-feishu-rm-assistant
     restart: unless-stopped
+    # The app exits on SIGTERM within ~5s (hard-exit watchdog); keep the
+    # docker kill grace tight so a regression cannot stall stops.
+    stop_grace_period: 6s
     env_file: .env
     environment:
       # TZ overrides the host zone resolution; keep it empty to follow the
