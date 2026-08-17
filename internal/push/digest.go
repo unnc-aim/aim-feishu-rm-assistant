@@ -30,16 +30,24 @@ type selection struct {
 
 // windowData bundles the fetched content of one digest window.
 type windowData struct {
+	Label     string // optional heading, set on fallback windows
 	Start     time.Time
 	End       time.Time
 	Announces []rmsearch.Document
 	Forums    []rmsearch.Document
 }
 
+func (w *windowData) empty() bool {
+	return len(w.Announces) == 0 && len(w.Forums) == 0
+}
+
 // BuildDigest assembles the digest card for the primary window [start,
 // end), optionally followed by a secondary window block (e.g. this week
-// for daily pushes, this month for weekly pushes). Empty windows are
-// rendered as reminders, never skipped.
+// for daily pushes, this month for weekly pushes). When the primary
+// window is empty the card falls back through progressively wider
+// windows (this week, past 7 days, this month, past 30 days); only when
+// all of them are empty does it render a "no updates in a month"
+// reminder.
 func (s *Scheduler) BuildDigest(ctx context.Context, start, end time.Time, secLabel string, secStart, secEnd time.Time) (map[string]interface{}, error) {
 	primary, err := s.fetchWindow(ctx, start, end)
 	if err != nil {
@@ -53,7 +61,51 @@ func (s *Scheduler) BuildDigest(ctx context.Context, start, end time.Time, secLa
 		}
 	}
 
-	return s.renderDigest(ctx, primary, secLabel, secondary), nil
+	// Cascade: an empty primary window widens until content is found.
+	var fallback *windowData
+	if len(primary.Announces) == 0 && len(primary.Forums) == 0 {
+		if fallback, err = s.findFallbackWindow(ctx, end); err != nil {
+			return nil, fmt.Errorf("fetch fallback window: %w", err)
+		}
+		// The fallback already provides the wider view; drop the regular
+		// secondary block to avoid rendering the same window twice.
+		secondary = nil
+	}
+
+	return s.renderDigest(ctx, primary, secLabel, secondary, fallback), nil
+}
+
+// findFallbackWindow walks the fallback chain and returns the first
+// window with any content, or nil when even the past 30 days are empty.
+func (s *Scheduler) findFallbackWindow(ctx context.Context, now time.Time) (*windowData, error) {
+	type fbWindow struct {
+		label     string
+		startFunc func(time.Time) time.Time
+	}
+	chain := []fbWindow{
+		{"本周动态", WeekStart},
+		{"近7天动态", func(t time.Time) time.Time { return t.AddDate(0, 0, -7) }},
+		{"本月动态", func(t time.Time) time.Time {
+			return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
+		}},
+		{"近30天动态", func(t time.Time) time.Time { return t.AddDate(0, 0, -30) }},
+	}
+	for _, fb := range chain {
+		w, err := s.fetchWindow(ctx, fb.startFunc(now), now)
+		if err != nil {
+			return nil, err
+		}
+		logrus.WithFields(logrus.Fields{
+			"fallback":  fb.label,
+			"announces": len(w.Announces),
+			"forums":    len(w.Forums),
+		}).Info("digest stage: fallback window probed")
+		if len(w.Announces) > 0 || len(w.Forums) > 0 {
+			w.Label = fb.label
+			return w, nil
+		}
+	}
+	return nil, nil
 }
 
 // fetchWindow pulls announcements and forum posts created in [start, end).
@@ -100,7 +152,7 @@ func before(endMS int64, docs []rmsearch.Document) []rmsearch.Document {
 	return out
 }
 
-func (s *Scheduler) renderDigest(ctx context.Context, primary *windowData, secLabel string, secondary *windowData) map[string]interface{} {
+func (s *Scheduler) renderDigest(ctx context.Context, primary *windowData, secLabel string, secondary *windowData, fallback *windowData) map[string]interface{} {
 	title := "RM 日报"
 	if primary.End.Sub(primary.Start) > 48*time.Hour {
 		title = "RM 周报"
@@ -110,13 +162,28 @@ func (s *Scheduler) renderDigest(ctx context.Context, primary *windowData, secLa
 		mdElement(fmt.Sprintf("%s ~ %s",
 			primary.Start.In(time.Local).Format("01-02 15:04"), primary.End.In(time.Local).Format("01-02 15:04"))),
 	}
-	elements = append(elements, s.windowElements(ctx, primary)...)
 
-	if secondary != nil {
-		elements = append(elements, divider(),
-			mdElement(fmt.Sprintf("**%s** (%s ~ %s)", secLabel,
-				secondary.Start.In(time.Local).Format("01-02"), secondary.End.In(time.Local).Format("01-02 15:04"))))
-		elements = append(elements, s.windowElements(ctx, secondary)...)
+	switch {
+	case !primary.empty():
+		elements = append(elements, s.windowElements(ctx, primary)...)
+		if secondary != nil {
+			elements = append(elements, divider(),
+				mdElement(fmt.Sprintf("**%s** (%s ~ %s)", secLabel,
+					secondary.Start.In(time.Local).Format("01-02"), secondary.End.In(time.Local).Format("01-02 15:04"))))
+			elements = append(elements, s.windowElements(ctx, secondary)...)
+		}
+	case fallback != nil:
+		// Primary window is empty; show the nearest window that has
+		// content instead of an empty reminder.
+		elements = append(elements,
+			mdElement("主窗口内没有新内容, 以下为最近的动态。"),
+			divider(),
+			mdElement(fmt.Sprintf("**%s** (%s ~ %s)", fallback.Label,
+				fallback.Start.In(time.Local).Format("01-02"), fallback.End.In(time.Local).Format("01-02 15:04"))),
+		)
+		elements = append(elements, s.windowElements(ctx, fallback)...)
+	default:
+		elements = append(elements, mdElement("最近一个月都没有新的动态。"))
 	}
 
 	elements = append(elements, noteEl("数据来源: RM Search · 摘要由大模型生成, 仅供参考"))
