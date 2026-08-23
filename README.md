@@ -83,31 +83,31 @@ go run .
 
 ### 全量部署 (连带私有 rm-search)
 
-`docker-compose.full.yml` 一并起动机器人和一套私有 rm-search (PostgreSQL + Meilisearch + rm-search + nginx), 不依赖 search.scutbot.cn:
+主 `docker-compose.yml` 一并起动机器人和一套私有 rm-search (PostgreSQL + Meilisearch + rm-search), 不依赖 search.scutbot.cn:
 
 ```bash
 export RMSEARCH_DIR=/path/to/rm-search   # rm-search 仓库的本地检出
 # .env 中额外设置 POSTGRES_PASSWORD 和 MEILI_MASTER_KEY (32+ 字符)
-docker compose -f docker-compose.full.yml up -d
+docker compose up -d
 ```
 
 启动后 rm-search 的定时任务每分钟自动增量同步论坛三类帖和公告; **历史帖子由内置的定时爬取任务自动回填** (每天 0/6/12/18 点, 每轮先把最新帖倒序爬到追新水位, 再向更早推进约 10 万个 ID, 触底后自动停止, 全程约 2~5 天)。等不及可手动加速 (与自动水位线兼容):
 
 ```bash
 # 首次: 索引设置
-docker compose -f docker-compose.full.yml run --rm \
+docker compose run --rm \
   --entrypoint /usr/local/bin/setup-index rm-search
 # 公告全量 (ID 1~3000 覆盖全部历史)
-docker compose -f docker-compose.full.yml run --rm \
+docker compose run --rm \
   --entrypoint /usr/local/bin/crawl rm-search \
   --announce-start 1 --announce-end 3000
 # 帖子全量 (后台, 断点可续; 可先爬近期 --posts-start 1700000)
-nohup docker compose -f docker-compose.full.yml run --rm \
+nohup docker compose run --rm \
   --entrypoint /usr/local/bin/crawl rm-search \
   --posts-start 0 --posts-end 2000000 --posts-goroutines 50 \
   >> crawl.log 2>&1 &
 # 回填完成后全量灌索引
-docker compose -f docker-compose.full.yml run --rm \
+docker compose run --rm \
   --entrypoint /usr/local/bin/recreate-index rm-search
 ```
 

@@ -1,24 +1,108 @@
+# All-in-one stack: the Feishu assistant WITH a private rm-search
+# (PostgreSQL + Meilisearch + rm-search), so the bot does not depend on
+# the public search.scutbot.cn deployment.
+#
+# Usage:
+#   export RMSEARCH_DIR=/path/to/rm-search   # a checkout of the
+#                                            # scutrobotlab/rm-search repo
+#   # .env needs, besides the FEISHU_*/LLM_* vars:
+#   #   POSTGRES_PASSWORD / MEILI_MASTER_KEY
+#   docker compose up -d
+#
+# First-run bootstrap (see README "全量部署" section):
+#   docker compose run --rm --entrypoint /usr/local/bin/setup-index rm-search
+#   docker compose run --rm --entrypoint /usr/local/bin/crawl rm-search \
+#     --announce-start 1 --announce-end 3000
+#   nohup docker compose run --rm --entrypoint /usr/local/bin/crawl rm-search \
+#     --posts-start 0 --posts-end 2000000 --posts-goroutines 50 \
+#     >> crawl.log 2>&1 &
+#   docker compose run --rm --entrypoint /usr/local/bin/recreate-index rm-search
+name: aim-rm-assistant
+
 services:
+  # Generates rm-search's config.yaml from environment variables into a
+  # shared volume, so no manual template copy is needed.
+  config-init:
+    image: alpine:3.20
+    restart: "no"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set in .env}
+    volumes:
+      - rm-search-config:/root/etc
+    command:
+      - sh
+      - -c
+      - |
+        printf 'DataSource: "host=postgres port=5432 user=postgres password=%s dbname=rm_search sslmode=disable"\nMeiliSearch:\n  Address: "http://meilisearch:7700"\n  APIKey: "%s"\nTikaHost: ""\nSearchLog:\n  Enabled: true\nProxy:\n  Enabled: false\nDJIMetaKey: ""\n' \
+          "$$POSTGRES_PASSWORD" "$$MEILI_MASTER_KEY" > /root/etc/config.yaml
+        echo "rm-search config generated"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: rm_search
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data/full/pg:/var/lib/postgresql/data
+      # Schema comes from the rm-search repo checkout.
+      - ${RMSEARCH_DIR:?export RMSEARCH_DIR to your rm-search checkout}/database/rm_search.sql:/docker-entrypoint-initdb.d/rm_search.sql:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rm_search"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set in .env}
+      MEILI_NO_ANALYTICS: "true"
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data/full/meili:/meili_data
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+
+  rm-search:
+    image: ghcr.io/unnc-aim/rm-search:latest
+    restart: unless-stopped
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_started
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${RMSEARCH_PORT:-8081}:8080"
+    volumes:
+      - rm-search-config:/root/etc:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+
   assistant:
     build: .
     image: aim-feishu-rm-assistant:latest
-    container_name: aim-feishu-rm-assistant
     restart: unless-stopped
-    # The app exits on SIGTERM within ~5s (hard-exit watchdog); keep the
-    # docker kill grace tight so a regression cannot stall stops.
-    stop_grace_period: 6s
+    depends_on:
+      - rm-search
     env_file: .env
     environment:
-      # TZ overrides the host zone resolution; keep it empty to follow the
-      # mounted /etc files below (works on macOS Docker Desktop and on
-      # Debian/Ubuntu hosts).
-      TZ: ${TZ:-}
+      TZ: ${TZ:-Asia/Shanghai}
+      # rm-search natively serves the /api/ms/* prefix.
+      RMSEARCH_BASE_URL: http://rm-search:8080
     volumes:
       - ./data:/data
-      # Expose the host timezone so the scheduler resolves its local zone.
-      # On Linux these are the system zone files; on macOS Docker Desktop
-      # they are special-cased to the host's zone (note: /etc/timezone
-      # there carries the VM default, so the app trusts /etc/localtime
-      # first, see internal/tz).
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+
+volumes:
+  rm-search-config:
