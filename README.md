@@ -1,6 +1,6 @@
 # AIM Feishu RM Assistant
 
-基于飞书机器人的 RoboMaster 助手。接入 [RM Search](https://search.scutbot.cn) 生产环境接口, 提供关键词搜索与定时精选推送, 推送摘要由大模型生成。
+基于飞书机器人的 RoboMaster 助手。接入 rm-search (默认随 compose 内置私有部署, 也可指向[生产环境](https://search.scutbot.cn)), 提供关键词搜索与定时精选推送, 推送摘要由大模型生成。
 
 ## 功能
 
@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | `FEISHU_APP_ID` | 飞书应用 App ID | 必填 |
 | `FEISHU_APP_SECRET` | 飞书应用 App Secret | 必填 |
-| `RMSEARCH_BASE_URL` | RM Search 部署地址 | `https://search.scutbot.cn` |
+| `RMSEARCH_BASE_URL` | rm-search 地址 (compose 内默认内置实例, 可指向外部部署如 `https://search.scutbot.cn`) | `http://rm-search:8080` |
 | `LLM_BASE_URL` | OpenAI 兼容接口地址 | `https://api.openai.com/v1` |
 | `LLM_API_KEY` | 大模型 API Key | 空 (为空时摘要降级) |
 | `LLM_MODEL` | 模型名 | `gpt-4o-mini` |
@@ -53,6 +53,8 @@
 | `PUSH_DEFAULT_HOUR` | 新订阅默认推送小时 | `20` |
 | `PUSH_DEFAULT_MINUTE` | 新订阅默认推送分钟 | `0` |
 | `TZ` | 时区覆盖, 留空跟随宿主机 | 空 |
+
+注: `SQLITE_PATH` / `LOG_DIR` 在 Docker 下无需设置 (镜像默认 `/data/assistant.db` 与 `/data/logs`); 表中默认值为裸 `go run` 场景。
 
 大模型仅用于摘要: 搜索结果的总结、推送条目的挑选与摘要。模型不会调用任何工具, 所有内容均来自 RM Search 接口返回。
 
@@ -94,10 +96,7 @@ docker compose up -d
 启动后 rm-search 的定时任务每分钟自动增量同步论坛三类帖和公告; **历史帖子由启动即常驻的后台回填循环持续爬取** (每块约 10 万个 ID, `RM_SEARCH_CRAWL_CHUNK` 可调, 触底后标记完成并永久停止), 每天 0/6/12/18 点另有追新任务补齐最新帖子。等不及可手动加速 (与自动水位线兼容):
 
 ```bash
-# 首次: 索引设置
-docker compose run --rm \
-  --entrypoint /usr/local/bin/setup-index rm-search
-# 公告全量 (ID 1~3000 覆盖全部历史)
+# 公告全量 (ID 1~3000 覆盖全部历史; 索引设置随 rm-search 启动自动应用, 无需手动步骤)
 docker compose run --rm \
   --entrypoint /usr/local/bin/crawl rm-search \
   --announce-start 1 --announce-end 3000
@@ -119,6 +118,8 @@ docker compose run --rm \
 - `internal/rmsearch` RM Search (Meilisearch 代理) 客户端
 - `internal/llm` OpenAI 兼容摘要客户端
 - `internal/store` SQLite 持久化 (设置、订阅、推送记录)
+- `internal/log` 按日轮转的文件日志
+- `internal/tz` 时区解析 (TZ / /etc/localtime / /etc/timezone 优先级)
 - `internal/bot` 飞书 WebSocket 接入、消息处理、交互卡片、意图解析
 - `internal/push` 定时调度与日报/周报生成
 
