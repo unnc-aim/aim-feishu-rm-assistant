@@ -55,6 +55,10 @@ type searchResponse struct {
 	Hits             []Document `json:"hits"`
 	Total            int64      `json:"estimatedTotalHits"`
 	ProcessingTimeMS int        `json:"processingTimeMs"`
+	// Meilisearch errors carry message/code instead of hits; a 200 with
+	// these fields is an error and must not read as zero results.
+	Message string `json:"message"`
+	Code    string `json:"code"`
 }
 
 // SearchResult carries the hits of one page plus the estimated total.
@@ -107,6 +111,9 @@ func (c *Client) Search(ctx context.Context, req *SearchRequest) (*SearchResult,
 	var sr searchResponse
 	if err := json.Unmarshal(data, &sr); err != nil {
 		return nil, fmt.Errorf("decode body: %w", err)
+	}
+	if sr.Message != "" {
+		return nil, fmt.Errorf("search api error %s: %s", sr.Code, sr.Message)
 	}
 	return &SearchResult{Hits: sr.Hits, Total: sr.Total}, nil
 }
