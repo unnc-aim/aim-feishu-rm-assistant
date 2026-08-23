@@ -96,8 +96,9 @@ services:
     env_file: .env
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      # rm-search natively serves the /api/ms/* prefix.
-      RMSEARCH_BASE_URL: http://rm-search:8080
+      # Bundled rm-search by default; set RMSEARCH_BASE_URL in .env to
+      # use an external deployment instead.
+      RMSEARCH_BASE_URL: ${RMSEARCH_BASE_URL:-http://rm-search:8080}
     volumes:
       - ./data:/data
       - /etc/localtime:/etc/localtime:ro

@@ -10,9 +10,10 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/aim-feishu-rm-assi
 # Runtime stage.
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata && \
-    adduser -D -u 10001 app
-USER app
+# Run as root: the /data bind mount is created root-owned by docker on
+# Linux hosts, and a non-root user cannot create the sqlite/log dirs in
+# it (macOS Docker Desktop would not show this, Linux servers do).
+RUN apk add --no-cache ca-certificates tzdata
 
 COPY --from=builder /out/aim-feishu-rm-assistant /usr/local/bin/aim-feishu-rm-assistant
 
