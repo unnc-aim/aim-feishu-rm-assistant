@@ -2,9 +2,8 @@
 # (PostgreSQL + Meilisearch + rm-search), so the bot does not depend on
 # the public search.scutbot.cn deployment.
 #
-# Usage:
-#   export RMSEARCH_DIR=/path/to/rm-search   # a checkout of the
-#                                            # scutrobotlab/rm-search repo
+# Usage (image-only, no repo checkout needed; the rm-search binary
+# applies the database schema itself at startup):
 #   # .env needs, besides the FEISHU_*/LLM_* vars:
 #   #   POSTGRES_PASSWORD / MEILI_MASTER_KEY
 #   docker compose up -d
@@ -47,8 +46,6 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./data/full/pg:/var/lib/postgresql/data
-      # Schema comes from the rm-search repo checkout.
-      - ${RMSEARCH_DIR:?export RMSEARCH_DIR to your rm-search checkout}/database/rm_search.sql:/docker-entrypoint-initdb.d/rm_search.sql:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     healthcheck:
@@ -89,8 +86,10 @@ services:
       - /etc/timezone:/etc/timezone:ro
 
   assistant:
-    build: .
-    image: aim-feishu-rm-assistant:latest
+    # For local development (e.g. arm64 Macs) comment the image line back
+    # to `build: .` to build natively instead of pulling the amd64 image.
+    # build: .
+    image: ghcr.io/unnc-aim/aim-feishu-rm-assistant:latest
     restart: unless-stopped
     depends_on:
       - rm-search

@@ -86,8 +86,8 @@ go run .
 主 `docker-compose.yml` 一并起动机器人和一套私有 rm-search (PostgreSQL + Meilisearch + rm-search), 不依赖 search.scutbot.cn:
 
 ```bash
-export RMSEARCH_DIR=/path/to/rm-search   # rm-search 仓库的本地检出
 # .env 中额外设置 POSTGRES_PASSWORD 和 MEILI_MASTER_KEY (32+ 字符)
+# 全部服务均从镜像运行 (rm-search 内嵌建表 DDL, 启动自动建表), 无需任何仓库检出
 docker compose up -d
 ```
 
@@ -111,7 +111,7 @@ docker compose run --rm \
   --entrypoint /usr/local/bin/recreate-index rm-search
 ```
 
-数据落在 `./data/full/` (pg、meili)。也可以直接使用 rm-search 仓库 `deploy/` 目录的独立部署 (见其 README)。
+数据落在 `./data/full/` (pg、meili)。assistant 与 rm-search 镜像均从 GHCR 拉取 (两个仓库的 CI 自动构建); 升级时 `docker compose pull && docker compose up -d`。本机开发 (如 arm64 Mac) 可将 compose 中 assistant 的 `image:` 换回 `build: .` 本地构建。也可以直接使用 rm-search 仓库 `deploy/` 目录的独立部署 (见其 README)。
 
 ## 目录结构
 
