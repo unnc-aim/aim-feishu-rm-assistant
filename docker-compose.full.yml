@@ -1,6 +1,6 @@
 # All-in-one stack: the Feishu assistant PLUS a private rm-search
-# (PostgreSQL + Meilisearch + rm-search + nginx), so the bot does not
-# depend on the public search.scutbot.cn deployment.
+# (PostgreSQL + Meilisearch + rm-search), so the bot does not depend on
+# the public search.scutbot.cn deployment.
 #
 # Usage:
 #   export RMSEARCH_DIR=/path/to/rm-search   # a checkout of the
@@ -74,7 +74,7 @@ services:
       - /etc/timezone:/etc/timezone:ro
 
   rm-search:
-    image: ghcr.io/scutrobotlab/rm-search:latest
+    image: ghcr.io/unnc-aim/rm-search:latest
     restart: unless-stopped
     depends_on:
       config-init:
@@ -90,30 +90,17 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
 
-  # Path adapter so the assistant can keep using /api/ms/* like production.
-  nginx:
-    image: nginx:1.27-alpine
-    restart: unless-stopped
-    depends_on:
-      - rm-search
-    environment:
-      TZ: ${TZ:-Asia/Shanghai}
-    volumes:
-      - ./rm-search.nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
-
   assistant:
     build: .
     image: aim-feishu-rm-assistant:latest
     restart: unless-stopped
     depends_on:
-      - nginx
+      - rm-search
     env_file: .env
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      # Inside the compose network the search API is one hop away.
-      RMSEARCH_BASE_URL: http://nginx
+      # rm-search natively serves the /api/ms/* prefix.
+      RMSEARCH_BASE_URL: http://rm-search:8080
     volumes:
       - ./data:/data
       - /etc/localtime:/etc/localtime:ro
