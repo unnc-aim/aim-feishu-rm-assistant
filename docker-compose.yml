@@ -16,7 +16,7 @@
 #     --posts-start 0 --posts-end 2000000 --posts-goroutines 50 \
 #     >> crawl.log 2>&1 &
 #   docker compose run --rm --entrypoint /usr/local/bin/recreate-index rm-search
-name: aim-rm-assistant
+name: aim-feishu-rm-assistant
 
 services:
   # Generates rm-search's config.yaml from environment variables into a
