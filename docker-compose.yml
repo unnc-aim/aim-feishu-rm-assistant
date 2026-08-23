@@ -19,24 +19,6 @@
 name: aim-feishu-rm-assistant
 
 services:
-  # Generates rm-search's config.yaml from environment variables into a
-  # shared volume, so no manual template copy is needed.
-  config-init:
-    image: alpine:3.20
-    restart: "no"
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set in .env}
-    volumes:
-      - rm-search-config:/root/etc
-    command:
-      - sh
-      - -c
-      - |
-        printf 'DataSource: "host=postgres port=5432 user=postgres password=%s dbname=rm_search sslmode=disable"\nMeiliSearch:\n  Address: "http://meilisearch:7700"\n  APIKey: "%s"\nTikaHost: ""\nSearchLog:\n  Enabled: true\nProxy:\n  Enabled: false\nDJIMetaKey: ""\n' \
-          "$$POSTGRES_PASSWORD" "$$MEILI_MASTER_KEY" > /root/etc/config.yaml
-        echo "rm-search config generated"
-
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -70,18 +52,28 @@ services:
     image: ghcr.io/unnc-aim/rm-search:latest
     restart: unless-stopped
     depends_on:
-      config-init:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       meilisearch:
         condition: service_started
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set in .env}
+    entrypoint: ["/bin/sh", "-c"]
+    # Render the config from environment variables on every start (so
+    # secret rotation in .env always takes effect), keep it on a shared
+    # volume for the one-shot tools (setup-index/crawl/recreate-index),
+    # then hand over to the server process.
+    command:
+      - |
+        printf 'DataSource: "host=postgres port=5432 user=postgres password=%s dbname=rm_search sslmode=disable"\nMeiliSearch:\n  Address: "http://meilisearch:7700"\n  APIKey: "%s"\nTikaHost: ""\nSearchLog:\n  Enabled: true\nProxy:\n  Enabled: false\nDJIMetaKey: ""\n' \
+          "$$POSTGRES_PASSWORD" "$$MEILI_MASTER_KEY" > /root/etc/config.yaml
+        exec /usr/local/bin/rm-search -config /root/etc/config.yaml
     ports:
       - "${RMSEARCH_PORT:-8081}:8080"
     volumes:
-      - rm-search-config:/root/etc:ro
+      - rm-search-config:/root/etc
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
 
