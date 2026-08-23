@@ -81,6 +81,38 @@ export $(grep -v '^#' .env | xargs)
 go run .
 ```
 
+### 全量部署 (连带私有 rm-search)
+
+`docker-compose.full.yml` 一并起动机器人和一套私有 rm-search (PostgreSQL + Meilisearch + rm-search + nginx), 不依赖 search.scutbot.cn:
+
+```bash
+export RMSEARCH_DIR=/path/to/rm-search   # rm-search 仓库的本地检出
+# .env 中额外设置 POSTGRES_PASSWORD 和 MEILI_MASTER_KEY (32+ 字符)
+docker compose -f docker-compose.full.yml up -d
+```
+
+启动后 rm-search 的定时任务每分钟自动增量同步论坛三类帖和公告; **历史数据需要一次性回填**:
+
+```bash
+# 首次: 索引设置
+docker compose -f docker-compose.full.yml run --rm \
+  --entrypoint /usr/local/bin/setup-index rm-search
+# 公告全量 (ID 1~3000 覆盖全部历史)
+docker compose -f docker-compose.full.yml run --rm \
+  --entrypoint /usr/local/bin/crawl rm-search \
+  --announce-start 1 --announce-end 3000
+# 帖子全量 (后台, 断点可续; 可先爬近期 --posts-start 1700000)
+nohup docker compose -f docker-compose.full.yml run --rm \
+  --entrypoint /usr/local/bin/crawl rm-search \
+  --posts-start 0 --posts-end 2000000 --posts-goroutines 50 \
+  >> crawl.log 2>&1 &
+# 回填完成后全量灌索引
+docker compose -f docker-compose.full.yml run --rm \
+  --entrypoint /usr/local/bin/recreate-index rm-search
+```
+
+数据落在 `./data/full/` (pg、meili)。也可以直接使用 rm-search 仓库 `deploy/` 目录的独立部署 (见其 README)。
+
 ## 目录结构
 
 - `internal/config` 环境变量配置
