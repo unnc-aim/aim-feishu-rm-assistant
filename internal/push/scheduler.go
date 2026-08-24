@@ -83,6 +83,14 @@ func (s *Scheduler) logSchedule() {
 func nextFire(sub *store.Settings, now time.Time) time.Time {
 	today := time.Date(now.Year(), now.Month(), now.Day(),
 		sub.PushHour, sub.PushMinute, 0, 0, now.Location())
+	if sub.Frequency == store.FrequencyMonthly {
+		firstThis := time.Date(now.Year(), now.Month(), 1,
+			sub.PushHour, sub.PushMinute, 0, 0, now.Location())
+		if now.Before(firstThis) {
+			return firstThis
+		}
+		return firstThis.AddDate(0, 1, 0)
+	}
 	if sub.Frequency == store.FrequencyWeekly {
 		weekday := int(now.Weekday())
 		if weekday == 0 {
@@ -169,6 +177,16 @@ func (s *Scheduler) due(sub *store.Settings, now time.Time) bool {
 
 // slotOf returns the most recent scheduled push time at or before now.
 func slotOf(sub *store.Settings, now time.Time) time.Time {
+	if sub.Frequency == store.FrequencyMonthly {
+		// Fixed natural month: push on the 1st at the configured time.
+		slot := time.Date(now.Year(), now.Month(), 1,
+			sub.PushHour, sub.PushMinute, 0, 0, now.Location())
+		if now.Before(slot) {
+			// Before this month's slot, the previous slot was last month.
+			return slot.AddDate(0, -1, 0)
+		}
+		return slot
+	}
 	if sub.Frequency == store.FrequencyWeekly {
 		// Fixed natural week: push on Monday at the configured time.
 		weekday := int(now.Weekday())
@@ -213,11 +231,12 @@ func (s *Scheduler) pushOne(ctx context.Context, sub *store.Settings, now time.T
 	// far for weekly pushes.
 	var secLabel string
 	var secStart, secEnd time.Time
-	if sub.Frequency == store.FrequencyWeekly {
+	switch sub.Frequency {
+	case store.FrequencyWeekly, store.FrequencyMonthly:
 		secLabel = "本月动态"
 		secStart = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		secEnd = now
-	} else {
+	default:
 		secLabel = "本周动态"
 		secStart = WeekStart(now)
 		secEnd = now
@@ -257,13 +276,18 @@ func WeekStart(t time.Time) time.Time {
 }
 
 // windowOf returns the period a push covers.
-// Daily: the 24 hours before the slot. Weekly: the previous natural week
-// (Monday 00:00 to Sunday 24:00, i.e. the Monday slot minus 7 days).
+// Daily: the 24 hours before the slot. Weekly: the previous natural week.
+// Monthly: the previous natural month (1st 00:00 to 1st 00:00).
 func windowOf(sub *store.Settings, slot time.Time) (time.Time, time.Time) {
-	if sub.Frequency == store.FrequencyWeekly {
+	switch sub.Frequency {
+	case store.FrequencyWeekly:
 		start := time.Date(slot.Year(), slot.Month(), slot.Day(), 0, 0, 0, 0, slot.Location()).AddDate(0, 0, -7)
 		end := start.AddDate(0, 0, 7)
 		return start, end
+	case store.FrequencyMonthly:
+		firstThis := time.Date(slot.Year(), slot.Month(), 1, 0, 0, 0, 0, slot.Location())
+		return firstThis.AddDate(0, -1, 0), firstThis
+	default:
+		return slot.Add(-24 * time.Hour), slot
 	}
-	return slot.Add(-24 * time.Hour), slot
 }

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+
+	"github.com/unnc-aim/aim-feishu-rm-assistant/internal/store"
 )
 
 // newMentionList builds a mention event list with the given keys.
@@ -32,6 +34,9 @@ func TestParseIntent(t *testing.T) {
 		{"关闭总结", IntentSummaryOff, 0, 0, false},
 		{"订阅每日推送", IntentSubscribeDaily, 0, 0, false},
 		{"订阅每周推送", IntentSubscribeWeekly, 0, 0, false},
+		{"订阅每月推送", IntentSubscribeMonthly, 0, 0, false},
+		{"每月1号9点推送", IntentSubscribeMonthly, 9, 0, true},
+		{"订阅月报", IntentSubscribeMonthly, 0, 0, false},
 		{"订阅每天晚上9点推送", IntentSubscribeDaily, 21, 0, true},
 		{"每天晚上8点半推送", IntentSubscribeDaily, 20, 30, true},
 		{"订阅周报 早上9点", IntentSubscribeWeekly, 9, 0, true},
@@ -116,5 +121,29 @@ func TestPrependAtElement(t *testing.T) {
 	first := elements[0]["text"].(map[string]any)["content"].(string)
 	if first != "<at user_id=\"ou_x\"></at>" {
 		t.Errorf("first element content = %q", first)
+	}
+}
+
+func TestManualDigestFreq(t *testing.T) {
+	cases := []struct {
+		in   string
+		freq string
+		ok   bool
+	}{
+		{"测试推送", store.FrequencyDaily, true},
+		{"立即推送", store.FrequencyDaily, true},
+		{"测试周推送", store.FrequencyWeekly, true},
+		{"测试每周推送", store.FrequencyWeekly, true},
+		{"测试月推送", store.FrequencyMonthly, true},
+		{"测试每月推送", store.FrequencyMonthly, true},
+		{"测试月报", store.FrequencyMonthly, true},
+		{"云台", "", false},
+		{"帮我测试一下", "", false},
+	}
+	for _, c := range cases {
+		freq, ok := manualDigestFreq(c.in)
+		if freq != c.freq || ok != c.ok {
+			t.Errorf("manualDigestFreq(%q) = (%q, %v), want (%q, %v)", c.in, freq, ok, c.freq, c.ok)
+		}
 	}
 }

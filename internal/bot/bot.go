@@ -95,9 +95,10 @@ type Bot struct {
 	botOpenID      string
 	botInfoLastTry time.Time
 
-	// ManualDigest, when wired, builds and sends a digest for the past 24h
-	// on demand ("测试推送"), used to verify the push pipeline end to end.
-	ManualDigest func(ctx context.Context, chatID string) error
+	// ManualDigest, when wired, builds and sends a digest of the given
+	// frequency's window on demand ("测试推送"/"测试周推送"/"测试月推送"),
+	// used to verify the push pipeline end to end.
+	ManualDigest func(ctx context.Context, chatID string, freq string) error
 }
 
 // New creates a Bot and starts its worker pool.
@@ -316,9 +317,10 @@ func (b *Bot) handleText(ctx context.Context, t task) error {
 		return b.replyCard(ctx, t, HelpCard())
 	}
 
-	// Manual digest trigger verifies the push pipeline end to end.
-	if t.Text == "测试推送" || t.Text == "立即推送" {
-		return b.manualDigest(ctx, t)
+	// Manual digest trigger verifies the push pipeline end to end:
+	// 测试推送 (daily) / 测试周推送 (weekly) / 测试月推送 (monthly).
+	if freq, ok := manualDigestFreq(t.Text); ok {
+		return b.manualDigest(ctx, t, freq)
 	}
 
 	// Pagination commands act on the previous query of this chat.
@@ -454,13 +456,37 @@ func (b *Bot) sendSummaryWithRetry(t task, query string, hits []rmsearch.Documen
 // push timeout.
 const pushPipelineTimeout = 5 * time.Minute
 
-// manualDigest triggers an immediate digest build for the past 24h so the
-// push pipeline can be verified without waiting for the schedule.
-func (b *Bot) manualDigest(ctx context.Context, t task) error {
+// manualDigestFreq recognizes the manual digest test commands.
+func manualDigestFreq(text string) (string, bool) {
+	t := strings.TrimSpace(text)
+	test := strings.HasPrefix(t, "测试") || strings.HasPrefix(t, "立即")
+	if !test {
+		return "", false
+	}
+	switch {
+	case strings.Contains(t, "月"):
+		return store.FrequencyMonthly, true
+	case strings.Contains(t, "周") || strings.Contains(t, "每周"):
+		return store.FrequencyWeekly, true
+	default:
+		return store.FrequencyDaily, true
+	}
+}
+
+// manualDigest triggers an immediate digest build (window by frequency) so
+// the push pipeline can be verified without waiting for the schedule.
+func (b *Bot) manualDigest(ctx context.Context, t task, freq string) error {
 	if b.ManualDigest == nil {
 		return b.replyText(ctx, t, "推送组件未就绪。")
 	}
-	if err := b.replyText(ctx, t, "正在生成最近 24 小时的推送, 请稍候..."); err != nil {
+	windowDesc := "最近 24 小时"
+	switch freq {
+	case store.FrequencyWeekly:
+		windowDesc = "上一个自然周"
+	case store.FrequencyMonthly:
+		windowDesc = "上一个自然月"
+	}
+	if err := b.replyText(ctx, t, "正在生成"+windowDesc+"的推送, 请稍候..."); err != nil {
 		return err
 	}
 	go func() {
@@ -468,7 +494,7 @@ func (b *Bot) manualDigest(ctx context.Context, t task) error {
 		start := time.Now()
 		mctx, cancel := context.WithTimeout(context.Background(), pushPipelineTimeout)
 		defer cancel()
-		if err := b.ManualDigest(mctx, t.ChatID); err != nil {
+		if err := b.ManualDigest(mctx, t.ChatID, freq); err != nil {
 			logrus.WithField("chat_id", t.ChatID).Errorf("manual digest failed after %s: %v",
 				time.Since(start).Round(time.Millisecond), err)
 			sctx, scancel := context.WithTimeout(context.Background(), sendTimeout)
@@ -558,6 +584,10 @@ func (b *Bot) handleIntent(ctx context.Context, t task, intent *Intent) error {
 	case IntentSubscribeWeekly:
 		if err := b.Store.UpsertSubscription(t.ChatID, store.FrequencyWeekly, hour, minute); err != nil {
 			return fmt.Errorf("subscribe weekly: %w", err)
+		}
+	case IntentSubscribeMonthly:
+		if err := b.Store.UpsertSubscription(t.ChatID, store.FrequencyMonthly, hour, minute); err != nil {
+			return fmt.Errorf("subscribe monthly: %w", err)
 		}
 	default:
 		return nil

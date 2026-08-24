@@ -16,6 +16,7 @@ const (
 	IntentUnsubscribe
 	IntentSummaryOn
 	IntentSummaryOff
+	IntentSubscribeMonthly
 )
 
 // Intent is a parsed user command about subscription or settings.
@@ -57,8 +58,13 @@ func ParseIntent(text string) *Intent {
 	intent := &Intent{}
 	intent.Hour, intent.Minute, intent.HasTime = parseTimeOfDay(t)
 
+	monthly := containsAny(t, []string{"每月", "每个月", "月报"})
 	weekly := containsAny(t, []string{"每周", "礼拜", "周报", "一周"})
 	daily := containsAny(t, []string{"每日", "每天", "日报", "日常"})
+	if monthly {
+		intent.Kind = IntentSubscribeMonthly
+		return intent
+	}
 	if weekly && !daily {
 		intent.Kind = IntentSubscribeWeekly
 		return intent

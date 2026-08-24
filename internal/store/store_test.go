@@ -42,6 +42,13 @@ func TestSubscriptionRoundtrip(t *testing.T) {
 	if err := s.UpsertSubscription("chat1", FrequencyDaily, 21, 30); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
+	if err := s.UpsertSubscription("chat2", FrequencyMonthly, 9, 0); err != nil {
+		t.Fatalf("upsert monthly: %v", err)
+	}
+	st2, err := s.GetSettings("chat2", "p2p")
+	if err != nil || st2.Frequency != FrequencyMonthly {
+		t.Errorf("monthly roundtrip: %+v, %v", st2, err)
+	}
 	st, err := s.GetSettings("chat1", "p2p")
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -52,6 +59,9 @@ func TestSubscriptionRoundtrip(t *testing.T) {
 
 	if err := s.Unsubscribe("chat1"); err != nil {
 		t.Fatalf("unsubscribe: %v", err)
+	}
+	if err := s.Unsubscribe("chat2"); err != nil {
+		t.Fatalf("unsubscribe chat2: %v", err)
 	}
 	st, _ = s.GetSettings("chat1", "p2p")
 	if st.Subscribed {

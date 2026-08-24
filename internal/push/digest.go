@@ -154,7 +154,11 @@ func before(endMS int64, docs []rmsearch.Document) []rmsearch.Document {
 
 func (s *Scheduler) renderDigest(ctx context.Context, primary *windowData, secLabel string, secondary *windowData, fallback *windowData) map[string]interface{} {
 	title := "RM 日报"
-	if primary.End.Sub(primary.Start) > 48*time.Hour {
+	span := primary.End.Sub(primary.Start)
+	switch {
+	case span > 20*24*time.Hour:
+		title = "RM 月报"
+	case span > 48*time.Hour:
 		title = "RM 周报"
 	}
 

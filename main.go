@@ -58,10 +58,25 @@ func main() {
 
 	go func() {
 		s := &push.Scheduler{Bot: b, Store: st}
-		b.ManualDigest = func(ctx context.Context, chatID string) error {
-			end := time.Now()
-			start := end.Add(-24 * time.Hour)
-			card, err := s.BuildDigest(ctx, start, end, "本周动态", push.WeekStart(end), end)
+		b.ManualDigest = func(ctx context.Context, chatID string, freq string) error {
+			now := time.Now()
+			var start, end time.Time
+			var secLabel string
+			var secStart time.Time
+			switch freq {
+			case store.FrequencyWeekly:
+				monday := push.WeekStart(now)
+				start, end = monday.AddDate(0, 0, -7), monday
+				secLabel, secStart = "本月动态", time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+			case store.FrequencyMonthly:
+				firstThis := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+				start, end = firstThis.AddDate(0, -1, 0), firstThis
+				secLabel, secStart = "本月动态", firstThis
+			default:
+				start, end = now.Add(-24*time.Hour), now
+				secLabel, secStart = "本周动态", push.WeekStart(now)
+			}
+			card, err := s.BuildDigest(ctx, start, end, secLabel, secStart, now)
 			if err != nil {
 				return err
 			}

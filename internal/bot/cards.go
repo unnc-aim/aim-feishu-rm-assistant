@@ -143,6 +143,8 @@ func SettingsCard(st *store.Settings) map[string]interface{} {
 		status = "未订阅"
 	case st.Frequency == store.FrequencyWeekly:
 		status = fmt.Sprintf("已订阅每周推送 (每周一 %02d:%02d)", st.PushHour, st.PushMinute)
+	case st.Frequency == store.FrequencyMonthly:
+		status = fmt.Sprintf("已订阅每月推送 (每月1日 %02d:%02d)", st.PushHour, st.PushMinute)
 	default:
 		status = fmt.Sprintf("已订阅每日推送 (每天 %02d:%02d)", st.PushHour, st.PushMinute)
 	}
@@ -156,7 +158,7 @@ func SettingsCard(st *store.Settings) map[string]interface{} {
 		"header": header("助手设置", "violet"),
 		"elements": []map[string]interface{}{
 			mdElement(fmt.Sprintf("**推送状态**: %s\n**搜索AI总结**: %s", status, summaryState)),
-			note("可发送: 订阅每日推送 / 订阅每周推送 / 订阅每天晚上9点推送 / 退订 / 开启总结 / 关闭总结"),
+			note("可发送: 订阅每日推送 / 订阅每周推送 / 订阅每月推送 / 订阅每天晚上9点推送 / 退订 / 开启总结 / 关闭总结"),
 		},
 	}
 }

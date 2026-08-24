@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -13,8 +14,9 @@ import (
 
 // Frequency of a digest subscription.
 const (
-	FrequencyDaily  = "daily"
-	FrequencyWeekly = "weekly"
+	FrequencyDaily   = "daily"
+	FrequencyWeekly  = "weekly"
+	FrequencyMonthly = "monthly"
 )
 
 // Settings holds per-chat preferences.
@@ -69,7 +71,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 CREATE TABLE IF NOT EXISTS subscriptions (
     chat_id      TEXT PRIMARY KEY,
-    frequency    TEXT NOT NULL CHECK (frequency IN ('daily','weekly')),
+    frequency    TEXT NOT NULL CHECK (frequency IN ('daily','weekly','monthly')),
     push_hour    INTEGER NOT NULL,
     push_minute  INTEGER NOT NULL DEFAULT 0,
     enabled      INTEGER NOT NULL DEFAULT 1,
@@ -88,6 +90,32 @@ CREATE TABLE IF NOT EXISTS push_log (
 	_, err := s.db.Exec(ddl)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+
+	// Older installs created subscriptions with a CHECK that rejects
+	// 'monthly'; SQLite cannot alter constraints, so rebuild the table
+	// once when the old definition is detected.
+	var tableSQL string
+	err = s.db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'subscriptions'`,
+	).Scan(&tableSQL)
+	if err == nil && !strings.Contains(tableSQL, "monthly") {
+		const rebuild = `
+ALTER TABLE subscriptions RENAME TO subscriptions_old;
+CREATE TABLE subscriptions (
+    chat_id      TEXT PRIMARY KEY,
+    frequency    TEXT NOT NULL CHECK (frequency IN ('daily','weekly','monthly')),
+    push_hour    INTEGER NOT NULL,
+    push_minute  INTEGER NOT NULL DEFAULT 0,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    last_push_at INTEGER NOT NULL DEFAULT 0,
+    updated_at   INTEGER NOT NULL
+);
+INSERT INTO subscriptions SELECT * FROM subscriptions_old;
+DROP TABLE subscriptions_old;`
+		if _, err := s.db.Exec(rebuild); err != nil {
+			return fmt.Errorf("migrate subscriptions for monthly: %w", err)
+		}
 	}
 	return nil
 }

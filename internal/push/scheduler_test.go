@@ -73,3 +73,37 @@ func TestWindowOf(t *testing.T) {
 		t.Errorf("daily window = %v ~ %v", start, end)
 	}
 }
+
+func monthlySub() *store.Settings {
+	return &store.Settings{Frequency: store.FrequencyMonthly, PushHour: 9}
+}
+
+func TestSlotOfAndWindowOfMonthly(t *testing.T) {
+	loc := time.FixedZone("test", 8*3600)
+	// 2026-08-24 is mid-month; the slot is Aug 1st 09:00, the window
+	// covers July (07-01 00:00 ~ 08-01 00:00).
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, loc)
+	slot := slotOf(monthlySub(), now)
+	want := time.Date(2026, 8, 1, 9, 0, 0, 0, loc)
+	if !slot.Equal(want) {
+		t.Fatalf("monthly slot = %v, want %v", slot, want)
+	}
+	start, end := windowOf(monthlySub(), slot)
+	if !start.Equal(time.Date(2026, 7, 1, 0, 0, 0, 0, loc)) {
+		t.Errorf("monthly window start = %v", start)
+	}
+	if !end.Equal(time.Date(2026, 8, 1, 0, 0, 0, 0, loc)) {
+		t.Errorf("monthly window end = %v", end)
+	}
+
+	// Before this month's slot (Aug 1st 08:00): slot falls back to July 1st.
+	early := time.Date(2026, 8, 1, 8, 0, 0, 0, loc)
+	if got := slotOf(monthlySub(), early); !got.Equal(time.Date(2026, 7, 1, 9, 0, 0, 0, loc)) {
+		t.Errorf("early-month slot = %v", got)
+	}
+
+	// nextFire: mid-month -> the 1st of next month.
+	if got := nextFire(monthlySub(), now); !got.Equal(time.Date(2026, 9, 1, 9, 0, 0, 0, loc)) {
+		t.Errorf("nextFire = %v, want 2026-09-01 09:00", got)
+	}
+}
