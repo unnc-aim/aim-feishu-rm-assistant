@@ -58,7 +58,7 @@ func main() {
 
 	go func() {
 		s := &push.Scheduler{Bot: b, Store: st}
-		b.ManualDigest = func(ctx context.Context, chatID string, freq string) error {
+		b.ManualDigest = func(ctx context.Context, chatID, msgID, freq string) error {
 			now := time.Now()
 			var start, end time.Time
 			var secLabel string
@@ -79,6 +79,9 @@ func main() {
 			card, err := s.BuildDigest(ctx, start, end, secLabel, secStart, now)
 			if err != nil {
 				return err
+			}
+			if msgID != "" {
+				return b.SendThreadedCard(ctx, chatID, msgID, card)
 			}
 			return b.SendCard(ctx, chatID, card)
 		}

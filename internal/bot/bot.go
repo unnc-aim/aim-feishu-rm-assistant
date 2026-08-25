@@ -63,6 +63,7 @@ type task struct {
 	ChatID   string
 	ChatType string
 	SenderID string // asking user's open_id, mentioned in group replies
+	MsgID    string // trigger message id, used to thread replies
 	Text     string
 }
 
@@ -97,8 +98,9 @@ type Bot struct {
 
 	// ManualDigest, when wired, builds and sends a digest of the given
 	// frequency's window on demand ("测试推送"/"测试周推送"/"测试月推送"),
-	// used to verify the push pipeline end to end.
-	ManualDigest func(ctx context.Context, chatID string, freq string) error
+	// used to verify the push pipeline end to end. msgID threads the card
+	// as a reply to the trigger message when non-empty.
+	ManualDigest func(ctx context.Context, chatID, msgID, freq string) error
 }
 
 // New creates a Bot and starts its worker pool.
@@ -236,6 +238,7 @@ func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageRecei
 	if event.Event.Sender != nil && event.Event.Sender.SenderId != nil {
 		senderID = deref(event.Event.Sender.SenderId.OpenId)
 	}
+	msgID := deref(msg.MessageId)
 
 	text := extractText(msg.Content, msg.Mentions)
 
@@ -261,7 +264,7 @@ func (b *Bot) onMessageReceive(ctx context.Context, event *larkim.P2MessageRecei
 		"msg_type":  deref(msg.MessageType),
 	}).Infof("received message: %s", clip(text, 200))
 
-	b.enqueue(task{ChatID: chatID, ChatType: chatType, SenderID: senderID, Text: text})
+	b.enqueue(task{ChatID: chatID, ChatType: chatType, SenderID: senderID, MsgID: msgID, Text: text})
 	return nil
 }
 
@@ -445,9 +448,7 @@ func (b *Bot) sendSummaryWithRetry(t task, query string, hits []rmsearch.Documen
 			query, summaryMaxRetries+1, lastErr)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-	defer cancel()
-	if err := b.replyCard(ctx, t, SummaryCard(query, text)); err != nil {
+	if err := b.replyCard(context.Background(), t, SummaryCard(query, text)); err != nil {
 		logrus.WithField("chat_id", t.ChatID).Warnf("send summary card failed: %v", err)
 	}
 }
@@ -486,7 +487,7 @@ func (b *Bot) manualDigest(ctx context.Context, t task, freq string) error {
 	case store.FrequencyMonthly:
 		windowDesc = "上一个自然月"
 	}
-	if err := b.replyText(ctx, t, "正在生成"+windowDesc+"的推送, 请稍候..."); err != nil {
+	if err := b.replyText(ctx, t, "正在生成"+windowDesc+"的推送 (约需 10~20 秒), 请稍候..."); err != nil {
 		return err
 	}
 	go func() {
@@ -494,7 +495,7 @@ func (b *Bot) manualDigest(ctx context.Context, t task, freq string) error {
 		start := time.Now()
 		mctx, cancel := context.WithTimeout(context.Background(), pushPipelineTimeout)
 		defer cancel()
-		if err := b.ManualDigest(mctx, t.ChatID, freq); err != nil {
+		if err := b.ManualDigest(mctx, t.ChatID, t.MsgID, freq); err != nil {
 			logrus.WithField("chat_id", t.ChatID).Errorf("manual digest failed after %s: %v",
 				time.Since(start).Round(time.Millisecond), err)
 			sctx, scancel := context.WithTimeout(context.Background(), sendTimeout)
@@ -624,12 +625,62 @@ func (b *Bot) replyText(ctx context.Context, t task, text string) error {
 }
 
 // replyCard sends an interactive card, mentioning the asker in groups by
-// prepending an at element.
+// prepending an at element. When the trigger message id is known the card
+// is threaded as a reply to it, so late results (e.g. a manual digest
+// arriving after later searches) stay visually attached to the command.
 func (b *Bot) replyCard(ctx context.Context, t task, card map[string]any) error {
 	if at := t.atMarkup(); at != "" {
 		prependAtElement(card, at)
 	}
+	if t.MsgID != "" {
+		return b.sendCardWithRetry(ctx, t, card)
+	}
 	return b.SendCard(ctx, t.ChatID, card)
+}
+
+// sendRetryDelays spaces retries of the final digest send: the LLM work
+// is already done, so a transient Feishu timeout must not drop the card.
+var sendRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+
+func (b *Bot) sendCardWithRetry(ctx context.Context, t task, card map[string]any) error {
+	return b.SendThreadedCard(ctx, t.ChatID, t.MsgID, card)
+}
+
+// SendThreadedCard sends a card as a reply to the given trigger message
+// with retries, so late results (e.g. a digest arriving after later
+// searches) stay visually attached to the command and a transient Feishu
+// API timeout does not drop finished work.
+func (b *Bot) SendThreadedCard(ctx context.Context, chatID, msgID string, card map[string]any) error {
+	content, err := json.Marshal(card)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for attempt, delay := range append([]time.Duration{0}, sendRetryDelays...) {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+		req := larkim.NewReplyMessageReqBuilder().
+			MessageId(msgID).
+			Body(larkim.NewReplyMessageReqBodyBuilder().
+				MsgType("interactive").
+				Content(string(content)).
+				Build()).
+			Build()
+		_, lastErr = b.Lark.Im.V1.Message.Reply(sctx, req)
+		cancel()
+		if lastErr == nil {
+			if attempt > 0 {
+				logrus.WithField("chat_id", chatID).
+					Infof("digest card delivered on retry attempt %d", attempt+1)
+			}
+			return nil
+		}
+		logrus.WithField("chat_id", chatID).
+			Warnf("send digest card attempt %d failed: %v", attempt+1, lastErr)
+	}
+	return lastErr
 }
 
 // SendText sends a plain text message to a chat.

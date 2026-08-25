@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -169,12 +170,22 @@ func (s *Scheduler) renderDigest(ctx context.Context, primary *windowData, secLa
 
 	switch {
 	case !primary.empty():
-		elements = append(elements, s.windowElements(ctx, primary)...)
+		// The two windows are independent; render them concurrently so
+		// the two pick+summary LLM chains overlap and the card arrives
+		// in about half the sequential time.
 		if secondary != nil {
+			primaryDone := make(chan []map[string]interface{}, 1)
+			secondaryDone := make(chan []map[string]interface{}, 1)
+			go func() { primaryDone <- s.safeWindowElements(ctx, primary) }()
+			go func() { secondaryDone <- s.safeWindowElements(ctx, secondary) }()
+			primaryElements, secElements := <-primaryDone, <-secondaryDone
+			elements = append(elements, primaryElements...)
 			elements = append(elements, divider(),
 				mdElement(fmt.Sprintf("**%s** (%s ~ %s)", secLabel,
 					secondary.Start.In(time.Local).Format("01-02"), secondary.End.In(time.Local).Format("01-02 15:04"))))
-			elements = append(elements, s.windowElements(ctx, secondary)...)
+			elements = append(elements, secElements...)
+		} else {
+			elements = append(elements, s.safeWindowElements(ctx, primary)...)
 		}
 	case fallback != nil:
 		// Primary window is empty; show the nearest window that has
@@ -197,6 +208,19 @@ func (s *Scheduler) renderDigest(ctx context.Context, primary *windowData, secLa
 		"header":   headerEl(title, "green"),
 		"elements": elements,
 	}
+}
+
+// safeWindowElements is windowElements with panic recovery, for callers
+// that run it in its own goroutine.
+func (s *Scheduler) safeWindowElements(ctx context.Context, w *windowData) (els []map[string]interface{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.Errorf("panic rendering digest window %s~%s: %v\n%s",
+				w.Start.Format("01-02 15:04"), w.End.Format("01-02 15:04"), r, debug.Stack())
+			els = []map[string]interface{}{mdElement("该窗口渲染失败。")}
+		}
+	}()
+	return s.windowElements(ctx, w)
 }
 
 // windowElements renders one window: empty reminder or AI summary, then
