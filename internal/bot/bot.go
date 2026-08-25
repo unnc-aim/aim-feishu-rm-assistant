@@ -668,8 +668,18 @@ func (b *Bot) SendThreadedCard(ctx context.Context, chatID, msgID string, card m
 				Content(string(content)).
 				Build()).
 			Build()
-		_, lastErr = b.Lark.Im.V1.Message.Reply(sctx, req)
+		// Assign, not declare: := here would shadow the outer lastErr and
+		// make every failure return nil ("sent") from the outer scope.
+		var resp *larkim.ReplyMessageResp
+		resp, lastErr = b.Lark.Im.V1.Message.Reply(sctx, req)
 		cancel()
+		if lastErr == nil && resp != nil && resp.Code != 0 {
+			// HTTP 200 with a business error: the card is rejected and
+			// nothing is delivered — surface it instead of reporting
+			// success, with enough card context to diagnose.
+			lastErr = fmt.Errorf("reply api business code %d: %s (card %d bytes, head %.300s)",
+				resp.Code, resp.Msg, len(content), string(content))
+		}
 		if lastErr == nil {
 			if attempt > 0 {
 				logrus.WithField("chat_id", chatID).

@@ -81,6 +81,8 @@ func TestSanitizeSummary(t *testing.T) {
 		{"**bold** stays", "**bold** stays"},
 		{"snake_case_word", `snake\_case\_word`},
 		{"*one* and **two** mixed", "one and **two** mixed"},
+		{"contains <div> tag", "contains ＜div＞ tag"},
+		{"angle <0.05 ok", "angle ＜0.05 ok"},
 	}
 	for _, c := range cases {
 		if got := SanitizeSummary(c.in); got != c.want {

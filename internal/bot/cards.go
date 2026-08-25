@@ -62,6 +62,11 @@ func SanitizeSummary(s string) string {
 	s = strings.ReplaceAll(s, "**", bold)
 	s = strings.ReplaceAll(s, "*", "")
 	s = strings.ReplaceAll(s, "_", "\\_")
+	// Raw HTML tags echoed from forum/announcement content are rejected
+	// outright by the card parser (ErrCode 11310); use fullwidth
+	// lookalikes so they render as text.
+	s = strings.ReplaceAll(s, "<", "＜")
+	s = strings.ReplaceAll(s, ">", "＞")
 	return strings.ReplaceAll(s, bold, "**")
 }
 
