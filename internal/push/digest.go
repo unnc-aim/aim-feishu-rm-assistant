@@ -389,6 +389,12 @@ func headerEl(title, template string) map[string]interface{} {
 	return map[string]interface{}{"template": template, "title": map[string]interface{}{"tag": "plain_text", "content": title}}
 }
 
+// noteEl renders a note block. Feishu note blocks only accept bare
+// lark_md text objects in elements — wrapping one in a div element is
+// rejected by the card parser (ErrCode 11310, "unsupported action tag:
+// <div> in the note block"), dropping the whole card.
 func noteEl(content string) map[string]interface{} {
-	return map[string]interface{}{"tag": "note", "elements": []map[string]interface{}{mdElement(content)}}
+	return map[string]interface{}{"tag": "note", "elements": []map[string]interface{}{
+		{"tag": "lark_md", "content": content},
+	}}
 }
