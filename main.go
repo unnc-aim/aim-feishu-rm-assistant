@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -47,8 +48,23 @@ func main() {
 
 	logrus.Infof("logging to daily files in %s", cfg.LogDir)
 
+	// The NAS routes container traffic through a TUN proxy whose TCP
+	// stack silently reaps connections idle for ~10-15s. A pooled
+	// connection reused after that window is a black hole (the request
+	// never reaches Feishu; the failure surfaces only as a timeout, and
+	// retries pick the same dead connection). Closing idle connections
+	// after 5s forces a fresh connection before the TUN reaps it.
+	feishuHTTP := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			ForceAttemptHTTP2:   true,
+			IdleConnTimeout:     5 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+	}
 	larkClient := lark.NewClient(cfg.AppID, cfg.AppSecret,
-		lark.WithReqTimeout(15*time.Second))
+		lark.WithReqTimeout(15*time.Second),
+		lark.WithHttpClient(feishuHTTP))
 	searchClient := rmsearch.NewClient(cfg.RmSearchBaseURL)
 	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel)
 	b := bot.New(larkClient, cfg.AppID, cfg.AppSecret, searchClient, llmClient, st, cfg.PushDefaultHour, cfg.PushDefaultMinute)
