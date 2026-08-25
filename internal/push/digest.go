@@ -260,8 +260,9 @@ func (s *Scheduler) windowElements(ctx context.Context, w *windowData) []map[str
 		elements = append(elements, mdElement("无"))
 	}
 	for _, f := range picked {
-		elements = append(elements, mdElement(fmt.Sprintf("- [%s](%s) · %s · %s",
-			escape(f.Title), f.URL, escape(f.Source), escape(f.Author))))
+		elements = append(elements, mdElement(fmt.Sprintf("- [%s](%s) · %s · %s · %s",
+			escape(f.Title), f.URL, escape(f.Source), escape(f.Author),
+			time.UnixMilli(f.CreateTimeMS).In(time.Local).Format("01-02 15:04"))))
 	}
 	return elements
 }
